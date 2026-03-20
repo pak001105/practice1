@@ -1,6 +1,5 @@
 import os
 import json
-import random
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -48,15 +47,15 @@ html, body, [class*="css"] {
     margin-bottom: 1rem;
 }
 .glass-card {
-    background: rgba(255,255,255,0.85);
-    border: 1px solid rgba(226,232,240,0.9);
+    background: rgba(255,255,255,0.88);
+    border: 1px solid rgba(226,232,240,0.95);
     border-radius: 22px;
     padding: 18px 18px 14px 18px;
     box-shadow: 0 8px 30px rgba(15,23,42,0.06);
     margin-bottom: 12px;
 }
 [data-testid="stMetric"] {
-    background: rgba(255,255,255,0.88);
+    background: rgba(255,255,255,0.92);
     border: 1px solid #e2e8f0;
     padding: 12px 14px;
     border-radius: 18px;
@@ -319,8 +318,34 @@ MAIN_MENU_MAP = {
 STREET_SUFFIXES = ["1길", "2길", "3길", "5길", "7길", "9길", "중앙로", "로데오길", "먹자골목", "번화로"]
 
 # =========================================================
-# 스타터 데이터 생성
+# 유틸
 # =========================================================
+def ensure_directories():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(GEO_DIR, exist_ok=True)
+    os.makedirs(REST_DIR, exist_ok=True)
+
+
+def download_file(url: str, path: str, timeout: int = 180):
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    with open(path, "wb") as f:
+        f.write(response.content)
+
+
+@st.cache_data(show_spinner=False)
+def ensure_geojson_files():
+    ensure_directories()
+    targets = [
+        (SIDO_GEO_PATH, SIDO_URL),
+        (SIGUNGU_GEO_PATH, SIGUNGU_URL),
+        (EMD_GEO_PATH, EMD_URL),
+    ]
+    for path, url in targets:
+        if not os.path.exists(path):
+            download_file(url, path)
+
+
 def region_offset(base_lat: float, base_lon: float, idx: int) -> Tuple[float, float]:
     lat = base_lat + ((idx % 9) - 4) * 0.0028
     lon = base_lon + (((idx // 9) % 9) - 4) * 0.0033
@@ -329,8 +354,7 @@ def region_offset(base_lat: float, base_lon: float, idx: int) -> Tuple[float, fl
 
 def generate_restaurant_name(emd: str, category: str, idx: int) -> str:
     suffixes = CATEGORY_TEMPLATES.get(category, CATEGORY_TEMPLATES["기타"])
-    suffix = suffixes[idx % len(suffixes)]
-    return f"{emd} {suffix}"
+    return f"{emd} {suffixes[idx % len(suffixes)]}"
 
 
 def generate_summary(category: str, emd: str, sigungu: str) -> str:
@@ -341,12 +365,27 @@ def generate_korean_address(sido: str, sigungu: str, emd: str, idx: int) -> str:
     suffix = STREET_SUFFIXES[idx % len(STREET_SUFFIXES)]
     lot_main = 10 + (idx * 3) % 87
     lot_sub = 1 + (idx * 7) % 18
-    # 동/읍/면 뒤에 자연스러운 지번형 주소
     if suffix in ["중앙로", "번화로"]:
         return f"{sido} {sigungu} {emd} {suffix} {lot_main}"
     if suffix == "먹자골목":
         return f"{sido} {sigungu} {emd} {suffix} {lot_main}-{lot_sub}"
     return f"{sido} {sigungu} {emd} {suffix} {lot_main}-{lot_sub}"
+
+
+def make_naver_map_search_url(query: str) -> str:
+    return f"https://map.naver.com/v5/search/{quote(query)}"
+
+
+def make_google_map_search_url(query: str) -> str:
+    return f"https://www.google.com/maps/search/{quote(query)}"
+
+
+def make_catchtable_search_url(query: str) -> str:
+    return f"https://www.catchtable.net/search?query={quote(query)}"
+
+
+def make_tabling_search_url(query: str) -> str:
+    return f"https://www.tabling.co.kr/search?query={quote(query)}"
 
 
 def build_starter_dataframe() -> pd.DataFrame:
@@ -359,9 +398,8 @@ def build_starter_dataframe() -> pd.DataFrame:
 
     for sido, region_info in REGION_SEEDS.items():
         base_lat, base_lon = region_info["center"]
-        sigungu_map = region_info["sigungu"]
 
-        for s_idx, (sigungu, emd_list) in enumerate(sigungu_map.items()):
+        for s_idx, (sigungu, emd_list) in enumerate(region_info["sigungu"].items()):
             sigungu_lat = base_lat + (s_idx - 3) * 0.022
             sigungu_lon = base_lon + (s_idx - 3) * 0.026
 
@@ -369,7 +407,6 @@ def build_starter_dataframe() -> pd.DataFrame:
                 emd_lat = sigungu_lat + (e_idx - 3) * 0.006
                 emd_lon = sigungu_lon + (e_idx - 3) * 0.007
 
-                # 동마다 10개씩 생성
                 for i in range(10):
                     category = categories_cycle[(i + e_idx + s_idx) % len(categories_cycle)]
                     name = generate_restaurant_name(emd, category, i)
@@ -411,7 +448,6 @@ def build_starter_dataframe() -> pd.DataFrame:
 
 def prepare_restaurants_if_needed():
     ensure_directories()
-
     if os.path.exists(RESTAURANT_PARQUET_PATH) or os.path.exists(RESTAURANT_CSV_PATH):
         return
 
@@ -452,6 +488,87 @@ def load_restaurants() -> pd.DataFrame:
     df = df.dropna(subset=["lat", "lon"]).copy()
     df["sort_score"] = df["rating"].fillna(0) * 1000 + df["review_count"]
     return df
+
+# =========================================================
+# GeoJSON/행정구역 유틸
+# =========================================================
+def get_first_existing(props: Dict[str, Any], keys: List[str]) -> str:
+    for key in keys:
+        if key in props and props[key] not in (None, ""):
+            return str(props[key]).strip()
+    return ""
+
+
+def get_feature_name(props: Dict[str, Any]) -> str:
+    return get_first_existing(props, [
+        "name", "NAME_1", "NAME_2", "NAME_3",
+        "CTP_KOR_NM", "SIG_KOR_NM", "EMD_KOR_NM",
+        "adm_nm", "sidonm", "sggnm", "emd_nm"
+    ]) or "이름없음"
+
+
+def get_feature_code(props: Dict[str, Any]) -> str:
+    return get_first_existing(props, [
+        "adm_cd", "adm_cd2", "adm_cd5", "adm_cd8",
+        "CTPRVN_CD", "SIG_CD", "EMD_CD", "code"
+    ])
+
+
+def collect_points(coords, result):
+    if isinstance(coords, list):
+        if len(coords) == 2 and all(isinstance(v, (int, float)) for v in coords):
+            result.append(coords)
+        else:
+            for item in coords:
+                collect_points(item, result)
+
+
+def get_feature_centroid(feature: Dict[str, Any]) -> Tuple[float, float]:
+    geometry = feature.get("geometry", {})
+    coords = geometry.get("coordinates", [])
+    points = []
+    collect_points(coords, points)
+
+    if not points:
+        return KOREA_CENTER[0], KOREA_CENTER[1]
+
+    lon = sum(p[0] for p in points) / len(points)
+    lat = sum(p[1] for p in points) / len(points)
+    return lat, lon
+
+
+def contains_name(props: Dict[str, Any], keyword: str) -> bool:
+    if not keyword:
+        return True
+    text = json.dumps(props, ensure_ascii=False)
+    return keyword in text
+
+
+def try_get_clicked_name(map_data: Dict[str, Any]) -> Optional[str]:
+    if not map_data:
+        return None
+
+    last_active = map_data.get("last_active_drawing")
+    if isinstance(last_active, dict):
+        props = last_active.get("properties", {})
+        if props:
+            return get_feature_name(props)
+
+    last_clicked = map_data.get("last_object_clicked")
+    if isinstance(last_clicked, dict):
+        props = last_clicked.get("properties", {})
+        if props:
+            return get_feature_name(props)
+
+    tooltip = map_data.get("last_object_clicked_tooltip")
+    if tooltip:
+        return str(tooltip).strip()
+
+    popup = map_data.get("last_object_clicked_popup")
+    if popup:
+        return str(popup).strip()
+
+    return None
 
 # =========================================================
 # 초기 준비
