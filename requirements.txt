@@ -1,5 +1,6 @@
 streamlit
-streamlit-folium
-folium
 pandas
-requests
+folium
+streamlit-folium
+pyarrow
+fastparquet
