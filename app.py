@@ -1,6 +1,5 @@
 import os
 import json
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -15,19 +14,18 @@ from streamlit_folium import st_folium
 st.set_page_config(
     page_title="대한민국 맛집 지도",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 st.title("🍽 대한민국 맛집 지도")
-st.caption("실제 행정구역 경계와 실제 음식점 데이터를 기반으로 탐색하는 지도입니다.")
+st.caption("실제 행정구역 경계 + 실제 일반음식점 공공데이터 기반 지도")
 
 # =========================================================
-# 경로 설정
+# 경로
 # =========================================================
 SIDO_GEO_PATH = "data/geo/sido.geojson"
 SIGUNGU_GEO_PATH = "data/geo/sigungu.geojson"
 EMD_GEO_PATH = "data/geo/emd.geojson"
-
 RESTAURANT_PARQUET_PATH = "data/restaurants/restaurants_merged.parquet"
 RESTAURANT_CSV_PATH = "data/restaurants/restaurants_merged.csv"
 
@@ -45,30 +43,34 @@ FOOD_TYPES = [
     "일식",
     "양식",
     "분식",
+    "카페",
     "카페/디저트",
-    "고기/구이",
-    "국밥/탕/찌개",
-    "면요리",
-    "해산물",
-    "술집/이자카야",
     "치킨",
     "피자",
+    "고기",
+    "구이",
+    "국밥",
+    "탕",
+    "찌개",
+    "면요리",
+    "해산물",
+    "술집",
+    "이자카야",
     "패스트푸드",
-    "비건/샐러드",
     "기타",
 ]
 
 # =========================================================
 # 유틸
 # =========================================================
-def ensure_file_exists(path: str, label: str):
+def ensure_exists(path: str, label: str):
     if not os.path.exists(path):
         st.error(f"{label} 파일이 없습니다: `{path}`")
         st.stop()
 
 
 def normalize_str(value: Any) -> str:
-    if value is None:
+    if value is None or pd.isna(value):
         return ""
     return str(value).strip()
 
@@ -80,38 +82,12 @@ def get_first_existing(props: Dict[str, Any], keys: List[str]) -> str:
     return ""
 
 
-def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except Exception:
-        return default
-
-
-def safe_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None or value == "":
-            return default
-        return int(float(value))
-    except Exception:
-        return default
-
-
-def make_naver_map_search_url(query: str) -> str:
-    from urllib.parse import quote
-    return f"https://map.naver.com/v5/search/{quote(query)}"
-
-
 def get_feature_name(props: Dict[str, Any]) -> str:
-    return (
-        get_first_existing(props, [
-            "name", "NAME_1", "NAME_2", "NAME_3",
-            "CTP_KOR_NM", "SIG_KOR_NM", "EMD_KOR_NM",
-            "adm_nm", "sidonm", "sggnm", "emd_nm"
-        ])
-        or "이름없음"
-    )
+    return get_first_existing(props, [
+        "name", "NAME_1", "NAME_2", "NAME_3",
+        "CTP_KOR_NM", "SIG_KOR_NM", "EMD_KOR_NM",
+        "adm_nm", "sidonm", "sggnm", "emd_nm"
+    ]) or "이름없음"
 
 
 def get_feature_code(props: Dict[str, Any]) -> str:
@@ -144,6 +120,13 @@ def get_feature_centroid(feature: Dict[str, Any]) -> Tuple[float, float]:
     return lat, lon
 
 
+def contains_name(props: Dict[str, Any], keyword: str) -> bool:
+    if not keyword:
+        return True
+    text = json.dumps(props, ensure_ascii=False)
+    return keyword in text
+
+
 def try_get_clicked_name(map_data: Dict[str, Any]) -> Optional[str]:
     if not map_data:
         return None
@@ -171,13 +154,6 @@ def try_get_clicked_name(map_data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def contains_name(props: Dict[str, Any], keyword: str) -> bool:
-    if not keyword:
-        return True
-    text = json.dumps(props, ensure_ascii=False)
-    return keyword in text
-
-
 # =========================================================
 # 데이터 로딩
 # =========================================================
@@ -194,12 +170,8 @@ def load_restaurants() -> pd.DataFrame:
     elif os.path.exists(RESTAURANT_CSV_PATH):
         df = pd.read_csv(RESTAURANT_CSV_PATH, encoding="utf-8")
     else:
-        raise FileNotFoundError(
-            f"음식점 데이터 파일이 없습니다. "
-            f"`{RESTAURANT_PARQUET_PATH}` 또는 `{RESTAURANT_CSV_PATH}` 중 하나가 필요합니다."
-        )
+        raise FileNotFoundError("restaurants_merged.parquet 또는 restaurants_merged.csv가 필요합니다.")
 
-    # 필수 컬럼 최소 보정
     expected_columns = {
         "name": "",
         "sido": "",
@@ -226,21 +198,12 @@ def load_restaurants() -> pd.DataFrame:
         if col not in df.columns:
             df[col] = default_value
 
-    df["name"] = df["name"].astype(str).fillna("")
-    df["sido"] = df["sido"].astype(str).fillna("")
-    df["sigungu"] = df["sigungu"].astype(str).fillna("")
-    df["emd"] = df["emd"].astype(str).fillna("")
-    df["address"] = df["address"].astype(str).fillna("")
-    df["road_address"] = df["road_address"].astype(str).fillna("")
-    df["food_category"] = df["food_category"].astype(str).fillna("기타")
-    df["main_menu"] = df["main_menu"].astype(str).fillna("")
-    df["summary"] = df["summary"].astype(str).fillna("")
-    df["parking"] = df["parking"].astype(str).fillna("")
-    df["waiting"] = df["waiting"].astype(str).fillna("")
-    df["opening_hours"] = df["opening_hours"].astype(str).fillna("")
-    df["phone"] = df["phone"].astype(str).fillna("")
-    df["source"] = df["source"].astype(str).fillna("")
-    df["naver_map_url"] = df["naver_map_url"].astype(str).fillna("")
+    for col in [
+        "name", "sido", "sigungu", "emd", "address", "road_address", "food_category",
+        "main_menu", "summary", "parking", "waiting", "opening_hours", "phone",
+        "source", "naver_map_url"
+    ]:
+        df[col] = df[col].astype(str).fillna("")
 
     df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
     df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
@@ -248,28 +211,21 @@ def load_restaurants() -> pd.DataFrame:
     df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce").fillna(0).astype(int)
 
     df = df.dropna(subset=["lat", "lon"]).copy()
-    df = df[(df["lat"] > 30) & (df["lat"] < 40) & (df["lon"] > 120) & (df["lon"] < 135)].copy()
+    df = df[
+        df["lat"].between(30, 40, inclusive="both")
+        & df["lon"].between(120, 135, inclusive="both")
+    ].copy()
 
-    # 네이버 링크 비어 있으면 자동 생성
-    blank_mask = df["naver_map_url"].astype(str).str.strip() == ""
-    df.loc[blank_mask, "naver_map_url"] = df.loc[blank_mask].apply(
-        lambda row: make_naver_map_search_url(f"{row['name']} {row['road_address'] or row['address']}"),
-        axis=1
-    )
-
-    # 대표 정렬용 점수
-    df["rating_for_sort"] = df["rating"].fillna(0.0)
-    df["priority_score"] = df["rating_for_sort"] * 1000 + df["review_count"]
-
+    df["priority_score"] = df["review_count"].fillna(0)
     return df
 
 
 # =========================================================
-# 파일 존재 확인
+# 파일 확인
 # =========================================================
-ensure_file_exists(SIDO_GEO_PATH, "시도 GeoJSON")
-ensure_file_exists(SIGUNGU_GEO_PATH, "시군구 GeoJSON")
-ensure_file_exists(EMD_GEO_PATH, "읍면동 GeoJSON")
+ensure_exists(SIDO_GEO_PATH, "시도 GeoJSON")
+ensure_exists(SIGUNGU_GEO_PATH, "시군구 GeoJSON")
+ensure_exists(EMD_GEO_PATH, "읍면동 GeoJSON")
 
 # =========================================================
 # 로딩
@@ -288,27 +244,16 @@ sido_features = sido_geo.get("features", [])
 sigungu_features = sigungu_geo.get("features", [])
 emd_features = emd_geo.get("features", [])
 
-for f in sido_features:
-    props = f.get("properties", {})
-    props["_display_name"] = get_feature_name(props)
-    props["_display_code"] = get_feature_code(props)
-    f["properties"] = props
+for features in [sido_features, sigungu_features, emd_features]:
+    for f in features:
+        props = f.get("properties", {})
+        props["_display_name"] = get_feature_name(props)
+        props["_display_code"] = get_feature_code(props)
+        f["properties"] = props
 
-for f in sigungu_features:
-    props = f.get("properties", {})
-    props["_display_name"] = get_feature_name(props)
-    props["_display_code"] = get_feature_code(props)
-    f["properties"] = props
-
-for f in emd_features:
-    props = f.get("properties", {})
-    props["_display_name"] = get_feature_name(props)
-    props["_display_code"] = get_feature_code(props)
-    f["properties"] = props
-
-sido_names = sorted(list({f["properties"].get("_display_name", "") for f in sido_features if f["properties"].get("_display_name")}))
-sigungu_names = sorted(list({f["properties"].get("_display_name", "") for f in sigungu_features if f["properties"].get("_display_name")}))
-emd_names = sorted(list({f["properties"].get("_display_name", "") for f in emd_features if f["properties"].get("_display_name")}))
+sido_names = sorted({f["properties"]["_display_name"] for f in sido_features if f["properties"].get("_display_name")})
+sigungu_names = sorted({f["properties"]["_display_name"] for f in sigungu_features if f["properties"].get("_display_name")})
+emd_names = sorted({f["properties"]["_display_name"] for f in emd_features if f["properties"].get("_display_name")})
 
 # =========================================================
 # 세션 상태
@@ -331,8 +276,8 @@ st.sidebar.header("🔎 검색 / 필터")
 
 selected_sido = st.sidebar.selectbox(
     "시도",
-    ["전체"] + sido_names,
-    index=0 if not st.session_state.selected_sido else (["전체"] + sido_names).index(st.session_state.selected_sido)
+    ["전체"] + sorted(restaurant_df["sido"].dropna().astype(str).unique().tolist()),
+    index=0 if not st.session_state.selected_sido else (["전체"] + sorted(restaurant_df["sido"].dropna().astype(str).unique().tolist())).index(st.session_state.selected_sido),
 )
 
 if selected_sido == "전체":
@@ -340,16 +285,13 @@ if selected_sido == "전체":
 else:
     sigungu_candidates = sorted(
         restaurant_df.loc[restaurant_df["sido"] == selected_sido, "sigungu"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
+        .dropna().astype(str).unique().tolist()
     )
 
 selected_sigungu = st.sidebar.selectbox(
     "시군구",
     ["전체"] + sigungu_candidates,
-    index=0 if not st.session_state.selected_sigungu else (["전체"] + sigungu_candidates).index(st.session_state.selected_sigungu)
+    index=0 if not st.session_state.selected_sigungu else (["전체"] + sigungu_candidates).index(st.session_state.selected_sigungu),
 )
 
 if selected_sigungu == "전체":
@@ -358,51 +300,36 @@ if selected_sigungu == "전체":
     else:
         emd_candidates = sorted(
             restaurant_df.loc[restaurant_df["sido"] == selected_sido, "emd"]
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
+            .dropna().astype(str).unique().tolist()
         )
 else:
     cond = restaurant_df["sigungu"] == selected_sigungu
     if selected_sido != "전체":
         cond &= restaurant_df["sido"] == selected_sido
     emd_candidates = sorted(
-        restaurant_df.loc[cond, "emd"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
+        restaurant_df.loc[cond, "emd"].dropna().astype(str).unique().tolist()
     )
 
 selected_emd = st.sidebar.selectbox(
     "읍면동",
     ["전체"] + emd_candidates,
-    index=0 if not st.session_state.selected_emd else (["전체"] + emd_candidates).index(st.session_state.selected_emd)
+    index=0 if not st.session_state.selected_emd else (["전체"] + emd_candidates).index(st.session_state.selected_emd),
 )
 
 food_type = st.sidebar.selectbox("음식 유형", FOOD_TYPES, index=0)
-search_keyword = st.sidebar.text_input("검색어", placeholder="예: 냉면, 국밥, 가족식사, 주차")
-min_rating = st.sidebar.slider("최소 평점", 0.0, 5.0, 3.7, 0.1)
-
-only_has_parking = st.sidebar.checkbox("주차 정보 있는 곳만", value=False)
-only_low_waiting = st.sidebar.checkbox("웨이팅 적은 곳 위주", value=False)
-
-sort_option = st.sidebar.radio(
-    "정렬 기준",
-    ["추천순", "평점순", "리뷰수순", "이름순"],
-    index=0
-)
-
+search_keyword = st.sidebar.text_input("검색어", placeholder="예: 냉면, 국밥, 가족식사")
+min_review_count = st.sidebar.slider("최소 리뷰수(공공데이터 기본값 0)", 0, 500, 0, 10)
+sort_option = st.sidebar.radio("정렬 기준", ["추천순", "이름순"], index=0)
 max_results = st.sidebar.slider("최대 표시 개수", 30, 300, 120, 10)
 
-# 세션 반영
+st.sidebar.info("현재 기본 데이터는 공공데이터 일반음식점 파일이라 평점 컬럼은 비어 있을 수 있습니다.")
+
 st.session_state.selected_sido = "" if selected_sido == "전체" else selected_sido
 st.session_state.selected_sigungu = "" if selected_sigungu == "전체" else selected_sigungu
 st.session_state.selected_emd = "" if selected_emd == "전체" else selected_emd
 
 # =========================================================
-# 현재 레벨
+# 레벨
 # =========================================================
 def current_level() -> str:
     if st.session_state.selected_emd:
@@ -416,7 +343,7 @@ def current_level() -> str:
 level = current_level()
 
 # =========================================================
-# 행정구역 표시용 feature 선택
+# 표시 feature
 # =========================================================
 def get_display_features() -> Tuple[List[Dict[str, Any]], str]:
     if level == "sido":
@@ -440,7 +367,6 @@ display_features, display_label = get_display_features()
 
 if display_features:
     lat, lon = get_feature_centroid(display_features[0])
-
     if level == "sido":
         st.session_state.map_center = KOREA_CENTER
         st.session_state.map_zoom = 7
@@ -455,7 +381,7 @@ if display_features:
         st.session_state.map_zoom = 13
 
 # =========================================================
-# 음식점 필터링
+# 업소 필터
 # =========================================================
 @st.cache_data(show_spinner=False)
 def filter_restaurants_cached(
@@ -465,9 +391,7 @@ def filter_restaurants_cached(
     emd: str,
     food_type: str,
     search_keyword: str,
-    min_rating: float,
-    only_has_parking: bool,
-    only_low_waiting: bool,
+    min_review_count: int,
 ) -> pd.DataFrame:
     filtered = df.copy()
 
@@ -479,31 +403,22 @@ def filter_restaurants_cached(
         filtered = filtered[filtered["emd"] == emd]
 
     if food_type != "전체":
-        filtered = filtered[filtered["food_category"].astype(str).str.contains(food_type, case=False, na=False)]
+        filtered = filtered[
+            filtered["food_category"].astype(str).str.contains(food_type, case=False, na=False)
+        ]
 
     if search_keyword.strip():
-        keyword = search_keyword.strip()
+        k = search_keyword.strip()
         combined = (
             filtered["name"].astype(str) + " " +
             filtered["food_category"].astype(str) + " " +
-            filtered["main_menu"].astype(str) + " " +
             filtered["summary"].astype(str) + " " +
             filtered["address"].astype(str) + " " +
             filtered["road_address"].astype(str)
         )
-        filtered = filtered[combined.str.contains(keyword, case=False, na=False)]
+        filtered = filtered[combined.str.contains(k, case=False, na=False)]
 
-    filtered = filtered[filtered["rating"].fillna(0) >= min_rating]
-
-    if only_has_parking:
-        filtered = filtered[filtered["parking"].astype(str).str.strip() != ""]
-
-    if only_low_waiting:
-        filtered = filtered[
-            filtered["waiting"].astype(str).str.contains("없|적|원활|여유", case=False, na=False)
-            | (filtered["waiting"].astype(str).str.strip() == "")
-        ]
-
+    filtered = filtered[filtered["review_count"].fillna(0) >= min_review_count]
     return filtered.copy()
 
 filtered_df = filter_restaurants_cached(
@@ -513,21 +428,14 @@ filtered_df = filter_restaurants_cached(
     st.session_state.selected_emd,
     food_type,
     search_keyword,
-    min_rating,
-    only_has_parking,
-    only_low_waiting,
+    min_review_count,
 )
 
 if sort_option == "추천순":
-    filtered_df = filtered_df.sort_values(["priority_score", "rating", "review_count"], ascending=[False, False, False])
-elif sort_option == "평점순":
-    filtered_df = filtered_df.sort_values(["rating", "review_count"], ascending=[False, False])
-elif sort_option == "리뷰수순":
-    filtered_df = filtered_df.sort_values(["review_count", "rating"], ascending=[False, False])
-elif sort_option == "이름순":
+    filtered_df = filtered_df.sort_values(["priority_score", "name"], ascending=[False, True])
+else:
     filtered_df = filtered_df.sort_values(["name"], ascending=[True])
 
-# 레벨별 표시 수 제한
 if level == "sido":
     marker_limit = min(max_results, MAX_MARKERS_SIDO)
 elif level == "sido_detail":
@@ -540,39 +448,33 @@ filtered_df = filtered_df.head(marker_limit).copy()
 # =========================================================
 # 상단 요약
 # =========================================================
-summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
-summary_col1.metric("현재 결과 수", f"{len(filtered_df):,}")
-summary_col2.metric("전체 업소 수", f"{len(restaurant_df):,}")
-summary_col3.metric("선택 시도", st.session_state.selected_sido or "전체")
-summary_col4.metric("선택 시군구", st.session_state.selected_sigungu or "전체")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("현재 표시 업소", f"{len(filtered_df):,}")
+c2.metric("전체 업소", f"{len(restaurant_df):,}")
+c3.metric("시도", st.session_state.selected_sido or "전체")
+c4.metric("시군구", st.session_state.selected_sigungu or "전체")
 
 # =========================================================
-# 레이아웃
+# 본문
 # =========================================================
 left_col, right_col = st.columns([1.85, 1.0])
 
-# =========================================================
-# 지도
-# =========================================================
 with left_col:
     m = folium.Map(
         location=st.session_state.map_center,
         zoom_start=st.session_state.map_zoom,
         tiles="CartoDB positron",
-        control_scale=True
+        control_scale=True,
     )
 
-    geojson_to_show = {
-        "type": "FeatureCollection",
-        "features": display_features
-    }
+    geojson_to_show = {"type": "FeatureCollection", "features": display_features}
 
     def style_fn(_feature):
         return {
             "fillColor": "#4F8BF9",
             "color": "#1E3A8A",
             "weight": 1.2,
-            "fillOpacity": 0.18
+            "fillOpacity": 0.18,
         }
 
     def highlight_fn(_feature):
@@ -580,7 +482,7 @@ with left_col:
             "fillColor": "#2563EB",
             "color": "#0F172A",
             "weight": 2.0,
-            "fillOpacity": 0.32
+            "fillOpacity": 0.32,
         }
 
     GeoJson(
@@ -596,27 +498,26 @@ with left_col:
             style=(
                 "background-color: white; color: #111827; font-family: Arial; "
                 "font-size: 13px; padding: 8px; border-radius: 6px;"
-            )
+            ),
         ),
         popup=GeoJsonPopup(
             fields=["_display_name", "_display_code"],
             aliases=[f"{display_label}명", "행정코드"],
             labels=True,
-            style="background-color: white; color: #111827; font-size: 13px; padding: 10px;"
-        )
+            style="background-color: white; color: #111827; font-size: 13px; padding: 10px;",
+        ),
     ).add_to(m)
 
-    # 맛집 마커
     for _, row in filtered_df.iterrows():
         road_address = row["road_address"] if normalize_str(row["road_address"]) else row["address"]
-        rating_text = "-" if pd.isna(row["rating"]) else f"{row['rating']:.1f}"
+        rating_text = "정보 없음" if pd.isna(row["rating"]) else f"{row['rating']:.1f}"
 
         popup_html = f"""
         <div style="width: 340px; font-family: Arial, sans-serif; line-height: 1.55;">
             <h4 style="margin: 0 0 8px 0;">{row['name']}</h4>
             <div><b>행정구역</b>: {row['sido']} {row['sigungu']} {row['emd']}</div>
             <div><b>주소</b>: {road_address}</div>
-            <div><b>음식 유형</b>: {row['food_category']}</div>
+            <div><b>음식 유형</b>: {row['food_category'] if normalize_str(row['food_category']) else '정보 없음'}</div>
             <div><b>평점</b>: {rating_text}</div>
             <div><b>리뷰 수</b>: {row['review_count']}</div>
             <div><b>대표 메뉴</b>: {row['main_menu'] if normalize_str(row['main_menu']) else '정보 없음'}</div>
@@ -625,19 +526,19 @@ with left_col:
             <div><b>웨이팅</b>: {row['waiting'] if normalize_str(row['waiting']) else '정보 없음'}</div>
             <div><b>운영시간</b>: {row['opening_hours'] if normalize_str(row['opening_hours']) else '정보 없음'}</div>
             <div><b>전화번호</b>: {row['phone'] if normalize_str(row['phone']) else '정보 없음'}</div>
-            <div><b>출처</b>: {row['source'] if normalize_str(row['source']) else '공공데이터/병합데이터'}</div>
+            <div><b>출처</b>: {row['source'] if normalize_str(row['source']) else '공공데이터'}</div>
             <hr style="margin: 10px 0;">
             <div><a href="{row['naver_map_url']}" target="_blank">네이버 지도에서 보기</a></div>
         </div>
         """
 
-        tooltip_text = f"{row['name']} | {row['food_category']} | 평점 {rating_text}"
+        tooltip_text = f"{row['name']} | {row['food_category']}"
 
         folium.Marker(
             location=[row["lat"], row["lon"]],
             tooltip=tooltip_text,
             popup=folium.Popup(popup_html, max_width=380),
-            icon=folium.Icon(icon="cutlery", prefix="fa")
+            icon=folium.Icon(icon="cutlery", prefix="fa"),
         ).add_to(m)
 
     folium.LayerControl().add_to(m)
@@ -650,89 +551,54 @@ with left_col:
             "last_active_drawing",
             "last_object_clicked",
             "last_object_clicked_tooltip",
-            "last_object_clicked_popup"
-        ]
+            "last_object_clicked_popup",
+        ],
     )
 
     clicked_name = try_get_clicked_name(map_data)
 
-    # 클릭 기반 드릴다운
     if clicked_name:
         if clicked_name in sido_names:
             st.session_state.selected_sido = clicked_name
             st.session_state.selected_sigungu = ""
             st.session_state.selected_emd = ""
             st.rerun()
-
         elif clicked_name in sigungu_names:
             st.session_state.selected_sigungu = clicked_name
             st.session_state.selected_emd = ""
             st.rerun()
-
         elif clicked_name in emd_names:
             st.session_state.selected_emd = clicked_name
             st.rerun()
 
-# =========================================================
-# 우측 상세 패널
-# =========================================================
 with right_col:
     st.subheader("📍 현재 선택")
     st.write(f"**시도**: {st.session_state.selected_sido or '전체'}")
     st.write(f"**시군구**: {st.session_state.selected_sigungu or '전체'}")
     st.write(f"**읍면동**: {st.session_state.selected_emd or '전체'}")
     st.write(f"**음식 유형**: {food_type}")
-    st.write(f"**최소 평점**: {min_rating}")
 
     st.markdown("---")
-    st.subheader("🍴 추천 업소")
+    st.subheader("🍴 업소 목록")
 
     if filtered_df.empty:
         st.info("현재 조건에 맞는 업소가 없습니다.")
     else:
-        show_cols = [
-            "name", "food_category", "rating", "review_count",
-            "sido", "sigungu", "emd"
-        ]
-        st.dataframe(filtered_df[show_cols], use_container_width=True, height=250)
+        show_cols = ["name", "food_category", "review_count", "sido", "sigungu", "emd"]
+        st.dataframe(filtered_df[show_cols], use_container_width=True, height=260)
 
         for i, (_, row) in enumerate(filtered_df.head(12).iterrows(), start=1):
-            rating_text = "-" if pd.isna(row["rating"]) else f"{row['rating']:.1f}"
-            with st.expander(f"{i}. {row['name']} | 평점 {rating_text}"):
+            with st.expander(f"{i}. {row['name']}"):
                 st.markdown(f"**행정구역**: {row['sido']} {row['sigungu']} {row['emd']}")
                 st.markdown(f"**주소**: {row['road_address'] if normalize_str(row['road_address']) else row['address']}")
-                st.markdown(f"**음식 유형**: {row['food_category']}")
-                st.markdown(f"**리뷰 수**: {row['review_count']}")
+                st.markdown(f"**음식 유형**: {row['food_category'] if normalize_str(row['food_category']) else '정보 없음'}")
                 st.markdown(f"**대표 메뉴**: {row['main_menu'] if normalize_str(row['main_menu']) else '정보 없음'}")
-                st.markdown(f"**맛 설명**: {row['summary'] if normalize_str(row['summary']) else '정보 없음'}")
+                st.markdown(f"**설명**: {row['summary'] if normalize_str(row['summary']) else '정보 없음'}")
                 st.markdown(f"**주차**: {row['parking'] if normalize_str(row['parking']) else '정보 없음'}")
                 st.markdown(f"**웨이팅**: {row['waiting'] if normalize_str(row['waiting']) else '정보 없음'}")
                 st.markdown(f"**운영시간**: {row['opening_hours'] if normalize_str(row['opening_hours']) else '정보 없음'}")
                 st.markdown(f"**전화번호**: {row['phone'] if normalize_str(row['phone']) else '정보 없음'}")
-                st.markdown(f"**출처**: {row['source'] if normalize_str(row['source']) else '공공데이터/병합데이터'}")
                 st.markdown(f"[네이버 지도에서 보기]({row['naver_map_url']})")
 
     st.markdown("---")
-    st.subheader("⚙ 사용한 데이터 컬럼 기준")
-    st.markdown(
-        """
-- `name`: 업소명  
-- `sido`, `sigungu`, `emd`: 실제 행정구역명  
-- `lat`, `lon`: 좌표  
-- `food_category`: 음식 분류  
-- `rating`: 평점  
-- `review_count`: 리뷰 수  
-- `main_menu`: 대표 메뉴  
-- `summary`: 맛/특징 요약  
-- `parking`: 주차 정보  
-- `waiting`: 웨이팅 정보  
-- `opening_hours`: 영업시간  
-- `naver_map_url`: 네이버 지도 링크  
-        """
-    )
-
-st.markdown("---")
-st.caption(
-    "권장: 시도 → 시군구 → 읍면동으로 좁혀가며 보시면 속도가 더 안정적입니다. "
-    "전국 단위에서 모든 마커를 한꺼번에 띄우지 않도록 제한되어 있습니다."
-)
+    st.info("이 버전은 공공데이터 기반 기본형입니다. 평점/메뉴/주차/웨이팅은 이후 별도 보강 파일을 붙이면 더 풍부해집니다.")
