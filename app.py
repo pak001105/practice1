@@ -3,6 +3,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
 import streamlit as st
 import folium
 from folium.features import GeoJson, GeoJsonTooltip, GeoJsonPopup
@@ -21,13 +22,22 @@ st.title("🍽 대한민국 맛집 지도")
 st.caption("실제 행정구역 경계 + 실제 일반음식점 공공데이터 기반 지도")
 
 # =========================================================
-# 경로
+# 경로 / URL
 # =========================================================
-SIDO_GEO_PATH = "data/geo/sido.geojson"
-SIGUNGU_GEO_PATH = "data/geo/sigungu.geojson"
-EMD_GEO_PATH = "data/geo/emd.geojson"
-RESTAURANT_PARQUET_PATH = "data/restaurants/restaurants_merged.parquet"
-RESTAURANT_CSV_PATH = "data/restaurants/restaurants_merged.csv"
+DATA_DIR = "data"
+GEO_DIR = os.path.join(DATA_DIR, "geo")
+REST_DIR = os.path.join(DATA_DIR, "restaurants")
+
+SIDO_GEO_PATH = os.path.join(GEO_DIR, "sido.geojson")
+SIGUNGU_GEO_PATH = os.path.join(GEO_DIR, "sigungu.geojson")
+EMD_GEO_PATH = os.path.join(GEO_DIR, "emd.geojson")
+
+RESTAURANT_PARQUET_PATH = os.path.join(REST_DIR, "restaurants_merged.parquet")
+RESTAURANT_CSV_PATH = os.path.join(REST_DIR, "restaurants_merged.csv")
+
+SIDO_URL = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/gadm/json/skorea-provinces-geo.json"
+SIGUNGU_URL = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/gadm/json/skorea-municipalities-geo.json"
+EMD_URL = "https://raw.githubusercontent.com/vuski/admdongkor/master/ver20220101/HangJeongDong_ver20220101.geojson"
 
 KOREA_CENTER = [36.35, 127.95]
 DEFAULT_ZOOM = 7
@@ -63,12 +73,6 @@ FOOD_TYPES = [
 # =========================================================
 # 유틸
 # =========================================================
-def ensure_exists(path: str, label: str):
-    if not os.path.exists(path):
-        st.error(f"{label} 파일이 없습니다: `{path}`")
-        st.stop()
-
-
 def normalize_str(value: Any) -> str:
     if value is None or pd.isna(value):
         return ""
@@ -154,6 +158,35 @@ def try_get_clicked_name(map_data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def download_file(url: str, path: str, timeout: int = 180):
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    with open(path, "wb") as f:
+        f.write(response.content)
+
+
+def ensure_directories():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(GEO_DIR, exist_ok=True)
+    os.makedirs(REST_DIR, exist_ok=True)
+
+
+@st.cache_data(show_spinner=False)
+def ensure_geojson_files():
+    ensure_directories()
+
+    targets = [
+        (SIDO_GEO_PATH, SIDO_URL, "시도"),
+        (SIGUNGU_GEO_PATH, SIGUNGU_URL, "시군구"),
+        (EMD_GEO_PATH, EMD_URL, "읍면동"),
+    ]
+
+    for path, url, label in targets:
+        if not os.path.exists(path):
+            with st.spinner(f"{label} GeoJSON 파일을 다운로드하는 중입니다..."):
+                download_file(url, path)
+
+
 # =========================================================
 # 데이터 로딩
 # =========================================================
@@ -170,7 +203,11 @@ def load_restaurants() -> pd.DataFrame:
     elif os.path.exists(RESTAURANT_CSV_PATH):
         df = pd.read_csv(RESTAURANT_CSV_PATH, encoding="utf-8")
     else:
-        raise FileNotFoundError("restaurants_merged.parquet 또는 restaurants_merged.csv가 필요합니다.")
+        raise FileNotFoundError(
+            "음식점 데이터 파일이 없습니다.\n\n"
+            f"- 필요 파일: `{RESTAURANT_PARQUET_PATH}` 또는 `{RESTAURANT_CSV_PATH}`\n"
+            "먼저 `prepare_data.py`를 실행해서 음식점 데이터를 생성해주세요."
+        )
 
     expected_columns = {
         "name": "",
@@ -221,18 +258,24 @@ def load_restaurants() -> pd.DataFrame:
 
 
 # =========================================================
-# 파일 확인
+# GeoJSON 자동 준비
 # =========================================================
-ensure_exists(SIDO_GEO_PATH, "시도 GeoJSON")
-ensure_exists(SIGUNGU_GEO_PATH, "시군구 GeoJSON")
-ensure_exists(EMD_GEO_PATH, "읍면동 GeoJSON")
+try:
+    ensure_geojson_files()
+except Exception as e:
+    st.error(f"GeoJSON 파일 준비 중 오류가 발생했습니다:\n\n{e}")
+    st.stop()
 
 # =========================================================
 # 로딩
 # =========================================================
-sido_geo = load_geojson(SIDO_GEO_PATH)
-sigungu_geo = load_geojson(SIGUNGU_GEO_PATH)
-emd_geo = load_geojson(EMD_GEO_PATH)
+try:
+    sido_geo = load_geojson(SIDO_GEO_PATH)
+    sigungu_geo = load_geojson(SIGUNGU_GEO_PATH)
+    emd_geo = load_geojson(EMD_GEO_PATH)
+except Exception as e:
+    st.error(f"GeoJSON 파일 로딩 중 오류가 발생했습니다:\n\n{e}")
+    st.stop()
 
 try:
     restaurant_df = load_restaurants()
@@ -274,10 +317,11 @@ if "map_zoom" not in st.session_state:
 # =========================================================
 st.sidebar.header("🔎 검색 / 필터")
 
+sido_options = ["전체"] + sorted(restaurant_df["sido"].dropna().astype(str).unique().tolist())
 selected_sido = st.sidebar.selectbox(
     "시도",
-    ["전체"] + sorted(restaurant_df["sido"].dropna().astype(str).unique().tolist()),
-    index=0 if not st.session_state.selected_sido else (["전체"] + sorted(restaurant_df["sido"].dropna().astype(str).unique().tolist())).index(st.session_state.selected_sido),
+    sido_options,
+    index=0 if not st.session_state.selected_sido or st.session_state.selected_sido not in sido_options else sido_options.index(st.session_state.selected_sido),
 )
 
 if selected_sido == "전체":
@@ -288,10 +332,11 @@ else:
         .dropna().astype(str).unique().tolist()
     )
 
+sigungu_options = ["전체"] + sigungu_candidates
 selected_sigungu = st.sidebar.selectbox(
     "시군구",
-    ["전체"] + sigungu_candidates,
-    index=0 if not st.session_state.selected_sigungu else (["전체"] + sigungu_candidates).index(st.session_state.selected_sigungu),
+    sigungu_options,
+    index=0 if not st.session_state.selected_sigungu or st.session_state.selected_sigungu not in sigungu_options else sigungu_options.index(st.session_state.selected_sigungu),
 )
 
 if selected_sigungu == "전체":
@@ -310,19 +355,20 @@ else:
         restaurant_df.loc[cond, "emd"].dropna().astype(str).unique().tolist()
     )
 
+emd_options = ["전체"] + emd_candidates
 selected_emd = st.sidebar.selectbox(
     "읍면동",
-    ["전체"] + emd_candidates,
-    index=0 if not st.session_state.selected_emd else (["전체"] + emd_candidates).index(st.session_state.selected_emd),
+    emd_options,
+    index=0 if not st.session_state.selected_emd or st.session_state.selected_emd not in emd_options else emd_options.index(st.session_state.selected_emd),
 )
 
 food_type = st.sidebar.selectbox("음식 유형", FOOD_TYPES, index=0)
 search_keyword = st.sidebar.text_input("검색어", placeholder="예: 냉면, 국밥, 가족식사")
-min_review_count = st.sidebar.slider("최소 리뷰수(공공데이터 기본값 0)", 0, 500, 0, 10)
+min_review_count = st.sidebar.slider("최소 리뷰수", 0, 500, 0, 10)
 sort_option = st.sidebar.radio("정렬 기준", ["추천순", "이름순"], index=0)
 max_results = st.sidebar.slider("최대 표시 개수", 30, 300, 120, 10)
 
-st.sidebar.info("현재 기본 데이터는 공공데이터 일반음식점 파일이라 평점 컬럼은 비어 있을 수 있습니다.")
+st.sidebar.info("현재 기본 데이터는 공공데이터 일반음식점 파일 기준입니다.")
 
 st.session_state.selected_sido = "" if selected_sido == "전체" else selected_sido
 st.session_state.selected_sigungu = "" if selected_sigungu == "전체" else selected_sigungu
@@ -601,4 +647,4 @@ with right_col:
                 st.markdown(f"[네이버 지도에서 보기]({row['naver_map_url']})")
 
     st.markdown("---")
-    st.info("이 버전은 공공데이터 기반 기본형입니다. 평점/메뉴/주차/웨이팅은 이후 별도 보강 파일을 붙이면 더 풍부해집니다.")
+    st.info("GeoJSON 파일은 이제 앱이 자동으로 다운로드합니다. 음식점 파일은 prepare_data.py로 생성해야 합니다.")
