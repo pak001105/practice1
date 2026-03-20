@@ -1,10 +1,8 @@
 import os
-import re
-import io
 import json
-import ssl
+import time
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, urljoin
+from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -12,12 +10,7 @@ import streamlit as st
 import folium
 from folium.features import GeoJson, GeoJsonTooltip, GeoJsonPopup
 from streamlit_folium import st_folium
-from pyproj import Transformer
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import urllib3
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from geopy.geocoders import Nominatim
 
 # =========================================================
 # 기본 설정
@@ -29,7 +22,7 @@ st.set_page_config(
 )
 
 st.title("🍽 대한민국 맛집 지도")
-st.caption("실제 행정구역 경계 + 공공데이터 기반 실제 음식점 지도")
+st.caption("행정구역 지도 + 실존 음식점 스타터 데이터 기반 버전")
 
 # =========================================================
 # 경로 / URL
@@ -42,20 +35,12 @@ SIDO_GEO_PATH = os.path.join(GEO_DIR, "sido.geojson")
 SIGUNGU_GEO_PATH = os.path.join(GEO_DIR, "sigungu.geojson")
 EMD_GEO_PATH = os.path.join(GEO_DIR, "emd.geojson")
 
-RESTAURANT_RAW_PATH = os.path.join(REST_DIR, "restaurant_raw_download")
 RESTAURANT_PARQUET_PATH = os.path.join(REST_DIR, "restaurants_merged.parquet")
 RESTAURANT_CSV_PATH = os.path.join(REST_DIR, "restaurants_merged.csv")
 
 SIDO_URL = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/gadm/json/skorea-provinces-geo.json"
 SIGUNGU_URL = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/gadm/json/skorea-municipalities-geo.json"
 EMD_URL = "https://raw.githubusercontent.com/vuski/admdongkor/master/ver20220101/HangJeongDong_ver20220101.geojson"
-
-# 현재 공공데이터포털이 안내하는 일반음식점 제공 URL
-GENERAL_RESTAURANTS_INFO_URL = "https://file.localdata.go.kr/file/general_restaurants/info"
-# 예전 경로(폴백)
-GENERAL_RESTAURANTS_LEGACY_XLSX_URL = "https://www.localdata.go.kr/datafile/each/07_24_04_P.xlsx"
-# 폴백용 모범음식점
-EXCELLENT_RESTAURANTS_INFO_URL = "https://file.localdata.go.kr/file/excellent_restaurant_info/info"
 
 KOREA_CENTER = [36.35, 127.95]
 DEFAULT_ZOOM = 7
@@ -84,8 +69,269 @@ FOOD_TYPES = [
     "해산물",
     "술집",
     "이자카야",
-    "패스트푸드",
+    "비건",
     "기타",
+]
+
+# =========================================================
+# 실존 음식점 스타터 데이터
+# =========================================================
+STARTER_RESTAURANTS = [
+    {
+        "name": "우래옥",
+        "sido": "서울특별시",
+        "sigungu": "중구",
+        "emd": "주교동",
+        "road_address": "62-29 Changgyeonggung-ro, Jung-gu, Seoul, 04546, South Korea",
+        "food_category": "면요리",
+        "main_menu": "평양냉면, 불고기",
+        "summary": "서울의 대표적인 평양냉면 노포로 알려진 곳",
+        "parking": "정보 없음",
+        "waiting": "피크 시간 대기 가능",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "명동교자",
+        "sido": "서울특별시",
+        "sigungu": "중구",
+        "emd": "명동",
+        "road_address": "29 Myeongdong 10-gil, Jung-gu, Seoul, 04537, South Korea",
+        "food_category": "면요리",
+        "main_menu": "칼국수, 만두",
+        "summary": "명동의 대표 칼국수 맛집으로 널리 알려진 곳",
+        "parking": "정보 없음",
+        "waiting": "대기 가능",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "하동관",
+        "sido": "서울특별시",
+        "sigungu": "중구",
+        "emd": "명동",
+        "road_address": "12 Myeongdong 9-gil, Jung-gu, Seoul, 04538, South Korea",
+        "food_category": "국밥",
+        "main_menu": "곰탕",
+        "summary": "명동 일대의 대표 곰탕 노포",
+        "parking": "정보 없음",
+        "waiting": "피크 시간 대기 가능",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "봉밀가",
+        "sido": "서울특별시",
+        "sigungu": "강남구",
+        "emd": "청담동",
+        "road_address": "664 Seolleung-ro, Gangnam-gu, Seoul, 06088, South Korea",
+        "food_category": "면요리",
+        "main_menu": "냉면, 메밀면",
+        "summary": "강남권에서 유명한 냉면/메밀면 계열 식당",
+        "parking": "정보 없음",
+        "waiting": "대기 가능",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "게방식당",
+        "sido": "서울특별시",
+        "sigungu": "강남구",
+        "emd": "논현동",
+        "road_address": "17 Seolleung-ro 131-gil, Gangnam-gu, Seoul, 06060, South Korea",
+        "food_category": "해산물",
+        "main_menu": "간장게장",
+        "summary": "간장게장으로 알려진 서울 식당",
+        "parking": "정보 없음",
+        "waiting": "대기 가능",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "코자차",
+        "sido": "서울특별시",
+        "sigungu": "강남구",
+        "emd": "청담동",
+        "road_address": "17 Hakdong-ro 97-gil, Gangnam-gu, Seoul, 06072, South Korea",
+        "food_category": "한식",
+        "main_menu": "한식 코스",
+        "summary": "청담동권 한식 레스토랑",
+        "parking": "정보 없음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "비움",
+        "sido": "서울특별시",
+        "sigungu": "강남구",
+        "emd": "청담동",
+        "road_address": "41 Hakdong-ro 97-gil, Gangnam-gu, Seoul, 06072, South Korea",
+        "food_category": "한식",
+        "main_menu": "한식",
+        "summary": "강남구 청담동의 한식 레스토랑",
+        "parking": "정보 없음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "라연",
+        "sido": "서울특별시",
+        "sigungu": "중구",
+        "emd": "장충동",
+        "road_address": "23F, Shilla Hotel, 249 Dongho-ro, Jung-gu, Seoul, 04605, South Korea",
+        "food_category": "한식",
+        "main_menu": "한식 코스",
+        "summary": "서울의 대표 고급 한식 레스토랑 중 하나",
+        "parking": "가능성 높음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "L'Amant Secret",
+        "sido": "서울특별시",
+        "sigungu": "중구",
+        "emd": "남대문로",
+        "road_address": "26F L'Escape Hotel, 67 Toegye-ro, Jung-gu, Seoul, 04529, South Korea",
+        "food_category": "양식",
+        "main_menu": "컨템포러리",
+        "summary": "호텔 상층부의 컨템포러리 다이닝",
+        "parking": "가능성 높음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "Restaurant Allen",
+        "sido": "서울특별시",
+        "sigungu": "강남구",
+        "emd": "역삼동",
+        "road_address": "2F Center field EAST E205, 231 Teheran-ro, Gangnam-gu, Seoul, 06142, South Korea",
+        "food_category": "양식",
+        "main_menu": "컨템포러리",
+        "summary": "강남권 컨템포러리 레스토랑",
+        "parking": "가능성 높음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "투루",
+        "sido": "부산광역시",
+        "sigungu": "부산진구",
+        "emd": "전포동",
+        "road_address": "38-1 Dongseong-ro 49 beon-gil, Busanjin-gu, Busan, 47304, South Korea",
+        "food_category": "일식",
+        "main_menu": "일식",
+        "summary": "부산진구 전포동의 일식 레스토랑",
+        "parking": "정보 없음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "IAán",
+        "sido": "부산광역시",
+        "sigungu": "해운대구",
+        "emd": "중동",
+        "road_address": "88 Dalmaji-gil 65beon-gil, Haeundae-gu, Busan, 48117, South Korea",
+        "food_category": "한식",
+        "main_menu": "한식 컨템포러리",
+        "summary": "해운대 달맞이길의 한식 컨템포러리 레스토랑",
+        "parking": "가능성 있음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "안목",
+        "sido": "부산광역시",
+        "sigungu": "수영구",
+        "emd": "광안동",
+        "road_address": "3 Gwangnam-ro 22 beon-gil, Suyeong-gu, Busan, 48307, South Korea",
+        "food_category": "국밥",
+        "main_menu": "돼지국밥",
+        "summary": "수영구 일대의 부산식 국밥 식당",
+        "parking": "정보 없음",
+        "waiting": "대기 가능",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "평양집",
+        "sido": "부산광역시",
+        "sigungu": "북구",
+        "emd": "구포동",
+        "road_address": "21 Geumgok-daero 20beon-gil, Buk-gu, Busan, 46547, South Korea",
+        "food_category": "한식",
+        "main_menu": "만두",
+        "summary": "북구 구포동의 만두/한식 식당",
+        "parking": "정보 없음",
+        "waiting": "대기 가능",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "Yulling",
+        "sido": "부산광역시",
+        "sigungu": "해운대구",
+        "emd": "중동",
+        "road_address": "2F, 28 Dalmaji-gil 62 beon-gil, Haeundae-gu, Busan, 48098, South Korea",
+        "food_category": "양식",
+        "main_menu": "프렌치 컨템포러리",
+        "summary": "해운대 달맞이길의 프렌치 컨템포러리 레스토랑",
+        "parking": "가능성 있음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "Le DORER",
+        "sido": "부산광역시",
+        "sigungu": "해운대구",
+        "emd": "우동",
+        "road_address": "2F, 37 Marine city 3-ro, Haeundae-gu, Busan, 48118, South Korea",
+        "food_category": "양식",
+        "main_menu": "컨템포러리",
+        "summary": "해운대 마린시티의 컨템포러리 레스토랑",
+        "parking": "가능성 있음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
+    {
+        "name": "Ramsey",
+        "sido": "부산광역시",
+        "sigungu": "수영구",
+        "emd": "민락동",
+        "road_address": "3F, 38 Gwanganhaebyeon-ro 284 beon-gil, Suyeong-gu, Busan, 48285, South Korea",
+        "food_category": "양식",
+        "main_menu": "모던 퀴진",
+        "summary": "광안리 인근의 모던 퀴진 레스토랑",
+        "parking": "가능성 있음",
+        "waiting": "예약 권장",
+        "opening_hours": "정보 확인 필요",
+        "phone": "정보 확인 필요",
+        "source": "MICHELIN Guide",
+    },
 ]
 
 # =========================================================
@@ -103,8 +349,11 @@ def normalize_str(value: Any) -> str:
     return str(value).strip()
 
 
-def make_naver_map_search_url(query: str) -> str:
-    return f"https://map.naver.com/v5/search/{quote(query)}"
+def download_file(url: str, path: str, timeout: int = 180):
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    with open(path, "wb") as f:
+        f.write(response.content)
 
 
 def get_first_existing(props: Dict[str, Any], keys: List[str]) -> str:
@@ -186,171 +435,8 @@ def try_get_clicked_name(map_data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    cols = list(df.columns)
-    for cand in candidates:
-        if cand in cols:
-            return cand
-    lower_map = {str(c).strip().lower(): c for c in cols}
-    for cand in candidates:
-        key = str(cand).strip().lower()
-        if key in lower_map:
-            return lower_map[key]
-    return None
-
-
-def parse_address_parts(address: str):
-    address = normalize_str(address)
-    if not address:
-        return "", "", ""
-
-    parts = address.split()
-    sido = parts[0] if len(parts) >= 1 else ""
-    sigungu = parts[1] if len(parts) >= 2 else ""
-    emd = parts[2] if len(parts) >= 3 else ""
-
-    if sido == "세종특별자치시" and len(parts) >= 2:
-        sigungu = "세종특별자치시"
-        emd = parts[1] if len(parts) >= 2 else ""
-
-    return sido, sigungu, emd
-
-
-def transform_xy_to_wgs84(x_series: pd.Series, y_series: pd.Series):
-    x = pd.to_numeric(x_series, errors="coerce")
-    y = pd.to_numeric(y_series, errors="coerce")
-
-    # data.go.kr 현재 안내는 EPSG:5174
-    t5174 = Transformer.from_crs("EPSG:5174", "EPSG:4326", always_xy=True)
-    lon_5174, lat_5174 = t5174.transform(x.values, y.values)
-    lat_5174 = pd.Series(lat_5174)
-    lon_5174 = pd.Series(lon_5174)
-
-    valid_5174 = (
-        lat_5174.between(30, 40, inclusive="both")
-        & lon_5174.between(120, 135, inclusive="both")
-    )
-
-    # 과거 문헌/미러 대응용 폴백
-    t2097 = Transformer.from_crs("EPSG:2097", "EPSG:4326", always_xy=True)
-    lon_2097, lat_2097 = t2097.transform(x.values, y.values)
-    lat_2097 = pd.Series(lat_2097)
-    lon_2097 = pd.Series(lon_2097)
-
-    valid_2097 = (
-        lat_2097.between(30, 40, inclusive="both")
-        & lon_2097.between(120, 135, inclusive="both")
-    )
-
-    if valid_5174.mean() >= valid_2097.mean():
-        return lat_5174, lon_5174
-    return lat_2097, lon_2097
-
-
-def build_summary(row):
-    pieces = []
-    food_type = normalize_str(row.get("food_category", ""))
-    if food_type:
-        pieces.append(f"{food_type} 업종")
-
-    status = normalize_str(row.get("business_status", ""))
-    detail_status = normalize_str(row.get("detail_status", ""))
-    if detail_status:
-        pieces.append(f"상태: {detail_status}")
-    elif status:
-        pieces.append(f"상태: {status}")
-
-    return " / ".join(pieces)
-
-
-def make_session() -> requests.Session:
-    session = requests.Session()
-    retry = Retry(
-        total=3,
-        read=3,
-        connect=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "HEAD"]
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "*/*",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Connection": "keep-alive",
-    })
-    return session
-
-
-def robust_get(url: str, timeout: int = 300) -> requests.Response:
-    session = make_session()
-    last_error = None
-
-    # 1차: 기본 검증
-    try:
-        r = session.get(url, timeout=timeout, allow_redirects=True)
-        r.raise_for_status()
-        return r
-    except Exception as e:
-        last_error = e
-
-    # 2차: SSL 검증 해제
-    try:
-        r = session.get(url, timeout=timeout, allow_redirects=True, verify=False)
-        r.raise_for_status()
-        return r
-    except Exception as e:
-        last_error = e
-
-    raise last_error
-
-
-def extract_download_link_from_html(html: str, base_url: str) -> Optional[str]:
-    # csv/xlsx/zip 직접 링크 추출
-    patterns = [
-        r'href=["\']([^"\']+\.csv(?:\?[^"\']*)?)["\']',
-        r'href=["\']([^"\']+\.xlsx(?:\?[^"\']*)?)["\']',
-        r'href=["\']([^"\']+\.zip(?:\?[^"\']*)?)["\']',
-        r'["\'](https?://[^"\']+/(?:download|down)[^"\']*)["\']',
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, html, flags=re.IGNORECASE)
-        if m:
-            return urljoin(base_url, m.group(1))
-    return None
-
-
-def download_binary(url: str) -> bytes:
-    r = robust_get(url)
-    ctype = (r.headers.get("content-type") or "").lower()
-
-    # HTML이면 다운로드 링크를 한 번 더 추출
-    if "text/html" in ctype or r.text.lstrip().lower().startswith("<!doctype html") or "<html" in r.text[:1000].lower():
-        link = extract_download_link_from_html(r.text, url)
-        if link:
-            r2 = robust_get(link)
-            r2.raise_for_status()
-            return r2.content
-
-    return r.content
-
-
-def sniff_file_kind(binary: bytes) -> str:
-    if binary[:2] == b"PK":
-        return "xlsx"
-    head = binary[:4000].decode("utf-8", errors="ignore").lower()
-    if "," in head or "사업장명" in head or "업소명" in head:
-        return "csv"
-    if "<html" in head:
-        return "html"
-    return "unknown"
+def make_naver_map_search_url(query: str) -> str:
+    return f"https://map.naver.com/v5/search/{quote(query)}"
 
 
 # =========================================================
@@ -366,50 +452,30 @@ def ensure_geojson_files():
     ]
     for path, url in targets:
         if not os.path.exists(path):
-            content = download_binary(url)
-            with open(path, "wb") as f:
-                f.write(content)
+            download_file(url, path)
 
 
-def load_raw_restaurant_source() -> Tuple[pd.DataFrame, str]:
-    """
-    반환: (원본 dataframe, source_name)
-    일반음식점 전체 다운로드를 우선 시도.
-    실패하면 모범음식점으로 폴백.
-    """
-    source_candidates = [
-        ("일반음식점", GENERAL_RESTAURANTS_INFO_URL),
-        ("일반음식점_레거시", GENERAL_RESTAURANTS_LEGACY_XLSX_URL),
-        ("모범음식점", EXCELLENT_RESTAURANTS_INFO_URL),
-    ]
+def geocode_address(address: str) -> Tuple[Optional[float], Optional[float]]:
+    geolocator = Nominatim(user_agent="korea_restaurant_map_app")
+    try:
+        location = geolocator.geocode(address, timeout=20)
+        if location:
+            return float(location.latitude), float(location.longitude)
+    except Exception:
+        pass
+    return None, None
 
-    errors = []
 
-    for label, url in source_candidates:
-        try:
-            raw = download_binary(url)
-            kind = sniff_file_kind(raw)
-
-            if kind == "csv":
-                # utf-8-sig / cp949 가능성 모두 대응
-                try:
-                    df = pd.read_csv(io.BytesIO(raw), encoding="utf-8")
-                except Exception:
-                    try:
-                        df = pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig")
-                    except Exception:
-                        df = pd.read_csv(io.BytesIO(raw), encoding="cp949")
-                return df, label
-
-            if kind == "xlsx":
-                df = pd.read_excel(io.BytesIO(raw), engine="openpyxl")
-                return df, label
-
-            errors.append(f"{label}: 파일 형식을 판별하지 못함")
-        except Exception as e:
-            errors.append(f"{label}: {e}")
-
-    raise RuntimeError("음식점 원본 다운로드에 실패했습니다.\n" + "\n".join(errors))
+def fallback_city_center(sido: str, sigungu: str) -> Tuple[float, float]:
+    centers = {
+        ("서울특별시", "중구"): (37.5636, 126.9976),
+        ("서울특별시", "강남구"): (37.5172, 127.0473),
+        ("부산광역시", "해운대구"): (35.1631, 129.1635),
+        ("부산광역시", "수영구"): (35.1456, 129.1131),
+        ("부산광역시", "부산진구"): (35.1629, 129.0531),
+        ("부산광역시", "북구"): (35.1973, 128.9902),
+    }
+    return centers.get((sido, sigungu), KOREA_CENTER[0:2])
 
 
 def prepare_restaurants_if_needed():
@@ -418,107 +484,40 @@ def prepare_restaurants_if_needed():
     if os.path.exists(RESTAURANT_PARQUET_PATH) or os.path.exists(RESTAURANT_CSV_PATH):
         return
 
-    with st.spinner("음식점 원본 데이터를 내려받고 정리하는 중입니다..."):
-        df, source_label = load_raw_restaurant_source()
+    with st.spinner("실존 음식점 스타터 데이터를 생성하는 중입니다..."):
+        df = pd.DataFrame(STARTER_RESTAURANTS).copy()
 
-        col_name = find_col(df, ["사업장명", "업소명", "업소명칭", "업소명(상호)"])
-        col_addr = find_col(df, ["소재지전체주소", "지번주소", "주소"])
-        col_road = find_col(df, ["도로명전체주소", "소재지도로명전체주소", "소재지도로명주소", "도로명주소"])
-        col_x = find_col(df, ["좌표정보(X)", "좌표정보x(epsg5174)", "좌표정보x", "좌표정보(X좌표)", "X"])
-        col_y = find_col(df, ["좌표정보(Y)", "좌표정보y(epsg5174)", "좌표정보y", "좌표정보(Y좌표)", "Y"])
-        col_type = find_col(df, ["업태구분명", "위생업태명", "음식의유형", "주된음식종류"])
-        col_phone = find_col(df, ["소재지전화", "전화번호"])
-        col_status = find_col(df, ["영업상태명"])
-        col_detail_status = find_col(df, ["상세영업상태명"])
-        col_status_code = find_col(df, ["영업상태구분코드", "상세영업상태코드"])
+        lats = []
+        lons = []
 
-        # 모범음식점 폴백은 위경도가 바로 있는 경우도 있음
-        if col_x is None:
-            col_x = find_col(df, ["경도"])
-        if col_y is None:
-            col_y = find_col(df, ["위도"])
+        for _, row in df.iterrows():
+            lat, lon = geocode_address(row["road_address"])
+            if lat is None or lon is None:
+                lat, lon = fallback_city_center(row["sido"], row["sigungu"])
+            lats.append(lat)
+            lons.append(lon)
+            time.sleep(1)
 
-        required = [col_name, col_addr or col_road, col_x, col_y]
-        if any(c is None for c in required):
-            raise ValueError(
-                "원본 파일의 핵심 컬럼을 찾지 못했습니다.\n"
-                f"name={col_name}, addr={col_addr}, road={col_road}, x={col_x}, y={col_y}"
-            )
-
-        work = df.copy()
-
-        # 일반음식점이면 영업중만 필터
-        if source_label.startswith("일반음식점"):
-            if col_detail_status:
-                work = work[work[col_detail_status].astype(str).str.contains("정상|영업", na=False)].copy()
-            elif col_status:
-                work = work[work[col_status].astype(str).str.contains("정상|영업", na=False)].copy()
-            elif col_status_code:
-                work = work[pd.to_numeric(work[col_status_code], errors="coerce").fillna(-1).isin([1])].copy()
-
-        # 좌표 처리
-        x_num = pd.to_numeric(work[col_x], errors="coerce")
-        y_num = pd.to_numeric(work[col_y], errors="coerce")
-
-        # 이미 위경도 형태면 그대로 사용
-        if x_num.between(120, 135, inclusive="both").mean() > 0.7 and y_num.between(30, 40, inclusive="both").mean() > 0.7:
-            lon = x_num
-            lat = y_num
-        else:
-            lat, lon = transform_xy_to_wgs84(work[col_x], work[col_y])
-
-        addr_series = work[col_road] if col_road else work[col_addr]
-        addr_series = addr_series.where(addr_series.astype(str).str.strip() != "", work[col_addr] if col_addr else "")
-
-        out = pd.DataFrame({
-            "name": work[col_name].astype(str).fillna("").str.strip(),
-            "address": work[col_addr].astype(str).fillna("").str.strip() if col_addr else "",
-            "road_address": work[col_road].astype(str).fillna("").str.strip() if col_road else "",
-            "lat": lat,
-            "lon": lon,
-            "food_category": work[col_type].astype(str).fillna("").str.strip() if col_type else "",
-            "phone": work[col_phone].astype(str).fillna("").str.strip() if col_phone else "",
-            "business_status": work[col_status].astype(str).fillna("").str.strip() if col_status else "",
-            "detail_status": work[col_detail_status].astype(str).fillna("").str.strip() if col_detail_status else "",
-        })
-
-        out = out[
-            out["lat"].between(30, 40, inclusive="both")
-            & out["lon"].between(120, 135, inclusive="both")
-        ].copy()
-
-        base_addr = out["road_address"].where(out["road_address"].str.strip() != "", out["address"])
-        parsed = base_addr.apply(parse_address_parts)
-        out["sido"] = parsed.apply(lambda x: x[0])
-        out["sigungu"] = parsed.apply(lambda x: x[1])
-        out["emd"] = parsed.apply(lambda x: x[2])
-
-        out["rating"] = pd.NA
-        out["review_count"] = 0
-        out["main_menu"] = ""
-        out["summary"] = out.apply(build_summary, axis=1)
-        out["parking"] = ""
-        out["waiting"] = ""
-        out["opening_hours"] = ""
-        out["source"] = "지방행정인허가데이터개방 일반음식점" if source_label.startswith("일반음식점") else "전국모범음식점표준데이터"
-        out["naver_map_url"] = out.apply(
-            lambda r: make_naver_map_search_url(f"{r['name']} {r['road_address'] or r['address']}"),
+        df["lat"] = lats
+        df["lon"] = lons
+        df["address"] = df["road_address"]
+        df["rating"] = pd.NA
+        df["review_count"] = 0
+        df["naver_map_url"] = df.apply(
+            lambda r: make_naver_map_search_url(f"{r['name']} {r['road_address']}"),
             axis=1
         )
 
-        out = out.drop_duplicates(subset=["name", "road_address", "address", "lat", "lon"]).copy()
+        ordered_cols = [
+            "name", "sido", "sigungu", "emd", "address", "road_address",
+            "lat", "lon", "food_category", "rating", "review_count",
+            "main_menu", "summary", "parking", "waiting", "opening_hours",
+            "phone", "source", "naver_map_url"
+        ]
+        df = df[ordered_cols].copy()
 
-        for c in [
-            "name", "sido", "sigungu", "emd", "address", "road_address", "food_category",
-            "main_menu", "summary", "parking", "waiting", "opening_hours", "phone",
-            "source", "naver_map_url"
-        ]:
-            out[c] = out[c].astype(str).fillna("").str.strip()
-
-        out["review_count"] = 0
-
-        out.to_csv(RESTAURANT_CSV_PATH, index=False, encoding="utf-8-sig")
-        out.to_parquet(RESTAURANT_PARQUET_PATH, index=False)
+        df.to_csv(RESTAURANT_CSV_PATH, index=False, encoding="utf-8-sig")
+        df.to_parquet(RESTAURANT_PARQUET_PATH, index=False)
 
 
 # =========================================================
@@ -539,50 +538,25 @@ def load_restaurants() -> pd.DataFrame:
     else:
         raise FileNotFoundError("음식점 데이터 파일 생성에 실패했습니다.")
 
-    expected_columns = {
-        "name": "",
-        "sido": "",
-        "sigungu": "",
-        "emd": "",
-        "address": "",
-        "road_address": "",
-        "lat": None,
-        "lon": None,
-        "food_category": "기타",
-        "rating": None,
-        "review_count": 0,
-        "main_menu": "",
-        "summary": "",
-        "parking": "",
-        "waiting": "",
-        "opening_hours": "",
-        "phone": "",
-        "source": "",
-        "naver_map_url": "",
-    }
-
-    for col, default_value in expected_columns.items():
-        if col not in df.columns:
-            df[col] = default_value
-
     for col in [
         "name", "sido", "sigungu", "emd", "address", "road_address", "food_category",
         "main_menu", "summary", "parking", "waiting", "opening_hours", "phone",
         "source", "naver_map_url"
     ]:
+        if col not in df.columns:
+            df[col] = ""
         df[col] = df[col].astype(str).fillna("")
 
-    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
-    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
-    df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
+    for col in ["lat", "lon", "rating"]:
+        if col not in df.columns:
+            df[col] = None
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "review_count" not in df.columns:
+        df["review_count"] = 0
     df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce").fillna(0).astype(int)
 
     df = df.dropna(subset=["lat", "lon"]).copy()
-    df = df[
-        df["lat"].between(30, 40, inclusive="both")
-        & df["lon"].between(120, 135, inclusive="both")
-    ].copy()
-
     return df
 
 
@@ -688,10 +662,10 @@ selected_emd = st.sidebar.selectbox(
 )
 
 food_type = st.sidebar.selectbox("음식 유형", FOOD_TYPES, index=0)
-search_keyword = st.sidebar.text_input("검색어", placeholder="예: 냉면, 국밥, 가족식사")
-max_results = st.sidebar.slider("최대 표시 개수", 30, 300, 120, 10)
+search_keyword = st.sidebar.text_input("검색어", placeholder="예: 냉면, 곰탕, 해산물")
+max_results = st.sidebar.slider("최대 표시 개수", 10, 100, 30, 5)
 
-st.sidebar.info("일반음식점 전체 다운로드가 실패하면 모범음식점 데이터로 자동 대체됩니다.")
+st.sidebar.info("이 버전은 막힌 공공데이터 다운로드 대신 실존 음식점 스타터 데이터를 사용합니다.")
 
 st.session_state.selected_sido = "" if selected_sido == "전체" else selected_sido
 st.session_state.selected_sigungu = "" if selected_sigungu == "전체" else selected_sigungu
@@ -711,6 +685,7 @@ def current_level() -> str:
 
 level = current_level()
 
+
 def get_display_features() -> Tuple[List[Dict[str, Any]], str]:
     if level == "sido":
         return sido_features, "시도"
@@ -724,6 +699,7 @@ def get_display_features() -> Tuple[List[Dict[str, Any]], str]:
         filtered = [f for f in emd_features if f["properties"].get("_display_name") == st.session_state.selected_emd]
         return filtered if filtered else emd_features, "읍면동"
     return sido_features, "시도"
+
 
 display_features, display_label = get_display_features()
 
@@ -775,11 +751,13 @@ def filter_restaurants_cached(
             filtered["food_category"].astype(str) + " " +
             filtered["summary"].astype(str) + " " +
             filtered["address"].astype(str) + " " +
-            filtered["road_address"].astype(str)
+            filtered["road_address"].astype(str) + " " +
+            filtered["main_menu"].astype(str)
         )
         filtered = filtered[combined.str.contains(k, case=False, na=False)]
 
     return filtered.copy()
+
 
 filtered_df = filter_restaurants_cached(
     restaurant_df,
@@ -788,16 +766,7 @@ filtered_df = filter_restaurants_cached(
     st.session_state.selected_emd,
     food_type,
     search_keyword,
-).sort_values(["name"], ascending=[True])
-
-if level == "sido":
-    marker_limit = min(max_results, MAX_MARKERS_SIDO)
-elif level == "sido_detail":
-    marker_limit = min(max_results, MAX_MARKERS_SIGUNGU)
-else:
-    marker_limit = min(max_results, MAX_MARKERS_EMD)
-
-filtered_df = filtered_df.head(marker_limit).copy()
+).sort_values(["name"], ascending=[True]).head(max_results)
 
 # =========================================================
 # 상단 요약
@@ -854,21 +823,19 @@ with left_col:
     ).add_to(m)
 
     for _, row in filtered_df.iterrows():
-        road_address = row["road_address"] if normalize_str(row["road_address"]) else row["address"]
-
         popup_html = f"""
         <div style="width: 340px; font-family: Arial, sans-serif; line-height: 1.55;">
             <h4 style="margin: 0 0 8px 0;">{row['name']}</h4>
             <div><b>행정구역</b>: {row['sido']} {row['sigungu']} {row['emd']}</div>
-            <div><b>주소</b>: {road_address}</div>
-            <div><b>음식 유형</b>: {row['food_category'] if normalize_str(row['food_category']) else '정보 없음'}</div>
-            <div><b>대표 메뉴</b>: {row['main_menu'] if normalize_str(row['main_menu']) else '정보 없음'}</div>
-            <div><b>요약</b>: {row['summary'] if normalize_str(row['summary']) else '정보 없음'}</div>
-            <div><b>주차</b>: {row['parking'] if normalize_str(row['parking']) else '정보 없음'}</div>
-            <div><b>웨이팅</b>: {row['waiting'] if normalize_str(row['waiting']) else '정보 없음'}</div>
-            <div><b>운영시간</b>: {row['opening_hours'] if normalize_str(row['opening_hours']) else '정보 없음'}</div>
-            <div><b>전화번호</b>: {row['phone'] if normalize_str(row['phone']) else '정보 없음'}</div>
-            <div><b>출처</b>: {row['source'] if normalize_str(row['source']) else '공공데이터'}</div>
+            <div><b>주소</b>: {row['road_address']}</div>
+            <div><b>음식 유형</b>: {row['food_category']}</div>
+            <div><b>대표 메뉴</b>: {row['main_menu']}</div>
+            <div><b>요약</b>: {row['summary']}</div>
+            <div><b>주차</b>: {row['parking']}</div>
+            <div><b>웨이팅</b>: {row['waiting']}</div>
+            <div><b>운영시간</b>: {row['opening_hours']}</div>
+            <div><b>전화번호</b>: {row['phone']}</div>
+            <div><b>출처</b>: {row['source']}</div>
             <hr style="margin: 10px 0;">
             <div><a href="{row['naver_map_url']}" target="_blank">네이버 지도에서 보기</a></div>
         </div>
@@ -930,9 +897,16 @@ with right_col:
         for i, (_, row) in enumerate(filtered_df.head(12).iterrows(), start=1):
             with st.expander(f"{i}. {row['name']}"):
                 st.markdown(f"**행정구역**: {row['sido']} {row['sigungu']} {row['emd']}")
-                st.markdown(f"**주소**: {row['road_address'] if normalize_str(row['road_address']) else row['address']}")
-                st.markdown(f"**음식 유형**: {row['food_category'] if normalize_str(row['food_category']) else '정보 없음'}")
-                st.markdown(f"**설명**: {row['summary'] if normalize_str(row['summary']) else '정보 없음'}")
-                st.markdown(f"**전화번호**: {row['phone'] if normalize_str(row['phone']) else '정보 없음'}")
+                st.markdown(f"**주소**: {row['road_address']}")
+                st.markdown(f"**음식 유형**: {row['food_category']}")
+                st.markdown(f"**대표 메뉴**: {row['main_menu']}")
+                st.markdown(f"**설명**: {row['summary']}")
+                st.markdown(f"**주차**: {row['parking']}")
+                st.markdown(f"**웨이팅**: {row['waiting']}")
+                st.markdown(f"**운영시간**: {row['opening_hours']}")
+                st.markdown(f"**전화번호**: {row['phone']}")
                 st.markdown(f"**출처**: {row['source']}")
                 st.markdown(f"[네이버 지도에서 보기]({row['naver_map_url']})")
+
+    st.markdown("---")
+    st.info("이 버전은 막힌 공공데이터 서버 대신 실존 음식점 스타터 목록으로 바로 실행되도록 만든 버전입니다.")
