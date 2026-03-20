@@ -1,6 +1,5 @@
 import os
 import json
-import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -10,7 +9,6 @@ import streamlit as st
 import folium
 from folium.features import GeoJson, GeoJsonTooltip, GeoJsonPopup
 from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
 
 # =========================================================
 # 기본 설정
@@ -75,6 +73,7 @@ FOOD_TYPES = [
 
 # =========================================================
 # 실존 음식점 스타터 데이터
+# geopy 제거를 위해 좌표를 직접 넣음
 # =========================================================
 STARTER_RESTAURANTS = [
     {
@@ -82,112 +81,94 @@ STARTER_RESTAURANTS = [
         "sido": "서울특별시",
         "sigungu": "중구",
         "emd": "주교동",
-        "road_address": "62-29 Changgyeonggung-ro, Jung-gu, Seoul, 04546, South Korea",
+        "road_address": "서울특별시 중구 창경궁로 62-29",
+        "lat": 37.5686,
+        "lon": 126.9982,
         "food_category": "면요리",
         "main_menu": "평양냉면, 불고기",
         "summary": "서울의 대표적인 평양냉면 노포로 알려진 곳",
-        "parking": "정보 없음",
+        "parking": "정보 확인 필요",
         "waiting": "피크 시간 대기 가능",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "명동교자",
         "sido": "서울특별시",
         "sigungu": "중구",
-        "emd": "명동",
-        "road_address": "29 Myeongdong 10-gil, Jung-gu, Seoul, 04537, South Korea",
+        "emd": "명동2가",
+        "road_address": "서울특별시 중구 명동10길 29",
+        "lat": 37.5634,
+        "lon": 126.9853,
         "food_category": "면요리",
         "main_menu": "칼국수, 만두",
         "summary": "명동의 대표 칼국수 맛집으로 널리 알려진 곳",
-        "parking": "정보 없음",
+        "parking": "정보 확인 필요",
         "waiting": "대기 가능",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "하동관",
         "sido": "서울특별시",
         "sigungu": "중구",
-        "emd": "명동",
-        "road_address": "12 Myeongdong 9-gil, Jung-gu, Seoul, 04538, South Korea",
+        "emd": "명동1가",
+        "road_address": "서울특별시 중구 명동9길 12",
+        "lat": 37.5641,
+        "lon": 126.9827,
         "food_category": "국밥",
         "main_menu": "곰탕",
         "summary": "명동 일대의 대표 곰탕 노포",
-        "parking": "정보 없음",
+        "parking": "정보 확인 필요",
         "waiting": "피크 시간 대기 가능",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "봉밀가",
         "sido": "서울특별시",
         "sigungu": "강남구",
         "emd": "청담동",
-        "road_address": "664 Seolleung-ro, Gangnam-gu, Seoul, 06088, South Korea",
+        "road_address": "서울특별시 강남구 선릉로 664",
+        "lat": 37.5227,
+        "lon": 127.0417,
         "food_category": "면요리",
         "main_menu": "냉면, 메밀면",
         "summary": "강남권에서 유명한 냉면/메밀면 계열 식당",
-        "parking": "정보 없음",
+        "parking": "정보 확인 필요",
         "waiting": "대기 가능",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "게방식당",
         "sido": "서울특별시",
         "sigungu": "강남구",
         "emd": "논현동",
-        "road_address": "17 Seolleung-ro 131-gil, Gangnam-gu, Seoul, 06060, South Korea",
+        "road_address": "서울특별시 강남구 선릉로131길 17",
+        "lat": 37.5199,
+        "lon": 127.0276,
         "food_category": "해산물",
         "main_menu": "간장게장",
         "summary": "간장게장으로 알려진 서울 식당",
-        "parking": "정보 없음",
+        "parking": "정보 확인 필요",
         "waiting": "대기 가능",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
-    },
-    {
-        "name": "코자차",
-        "sido": "서울특별시",
-        "sigungu": "강남구",
-        "emd": "청담동",
-        "road_address": "17 Hakdong-ro 97-gil, Gangnam-gu, Seoul, 06072, South Korea",
-        "food_category": "한식",
-        "main_menu": "한식 코스",
-        "summary": "청담동권 한식 레스토랑",
-        "parking": "정보 없음",
-        "waiting": "예약 권장",
-        "opening_hours": "정보 확인 필요",
-        "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
-    },
-    {
-        "name": "비움",
-        "sido": "서울특별시",
-        "sigungu": "강남구",
-        "emd": "청담동",
-        "road_address": "41 Hakdong-ro 97-gil, Gangnam-gu, Seoul, 06072, South Korea",
-        "food_category": "한식",
-        "main_menu": "한식",
-        "summary": "강남구 청담동의 한식 레스토랑",
-        "parking": "정보 없음",
-        "waiting": "예약 권장",
-        "opening_hours": "정보 확인 필요",
-        "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "라연",
         "sido": "서울특별시",
         "sigungu": "중구",
-        "emd": "장충동",
-        "road_address": "23F, Shilla Hotel, 249 Dongho-ro, Jung-gu, Seoul, 04605, South Korea",
+        "emd": "장충동2가",
+        "road_address": "서울특별시 중구 동호로 249",
+        "lat": 37.5568,
+        "lon": 127.0059,
         "food_category": "한식",
         "main_menu": "한식 코스",
         "summary": "서울의 대표 고급 한식 레스토랑 중 하나",
@@ -195,29 +176,16 @@ STARTER_RESTAURANTS = [
         "waiting": "예약 권장",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
-    },
-    {
-        "name": "L'Amant Secret",
-        "sido": "서울특별시",
-        "sigungu": "중구",
-        "emd": "남대문로",
-        "road_address": "26F L'Escape Hotel, 67 Toegye-ro, Jung-gu, Seoul, 04529, South Korea",
-        "food_category": "양식",
-        "main_menu": "컨템포러리",
-        "summary": "호텔 상층부의 컨템포러리 다이닝",
-        "parking": "가능성 높음",
-        "waiting": "예약 권장",
-        "opening_hours": "정보 확인 필요",
-        "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "Restaurant Allen",
         "sido": "서울특별시",
         "sigungu": "강남구",
         "emd": "역삼동",
-        "road_address": "2F Center field EAST E205, 231 Teheran-ro, Gangnam-gu, Seoul, 06142, South Korea",
+        "road_address": "서울특별시 강남구 테헤란로 231",
+        "lat": 37.5037,
+        "lon": 127.0418,
         "food_category": "양식",
         "main_menu": "컨템포러리",
         "summary": "강남권 컨템포러리 레스토랑",
@@ -225,29 +193,33 @@ STARTER_RESTAURANTS = [
         "waiting": "예약 권장",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "투루",
         "sido": "부산광역시",
         "sigungu": "부산진구",
         "emd": "전포동",
-        "road_address": "38-1 Dongseong-ro 49 beon-gil, Busanjin-gu, Busan, 47304, South Korea",
+        "road_address": "부산광역시 부산진구 동성로49번길 38-1",
+        "lat": 35.1598,
+        "lon": 129.0668,
         "food_category": "일식",
         "main_menu": "일식",
         "summary": "부산진구 전포동의 일식 레스토랑",
-        "parking": "정보 없음",
+        "parking": "정보 확인 필요",
         "waiting": "예약 권장",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "IAán",
         "sido": "부산광역시",
         "sigungu": "해운대구",
         "emd": "중동",
-        "road_address": "88 Dalmaji-gil 65beon-gil, Haeundae-gu, Busan, 48117, South Korea",
+        "road_address": "부산광역시 해운대구 달맞이길65번길 88",
+        "lat": 35.1583,
+        "lon": 129.1867,
         "food_category": "한식",
         "main_menu": "한식 컨템포러리",
         "summary": "해운대 달맞이길의 한식 컨템포러리 레스토랑",
@@ -255,82 +227,41 @@ STARTER_RESTAURANTS = [
         "waiting": "예약 권장",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "안목",
         "sido": "부산광역시",
         "sigungu": "수영구",
         "emd": "광안동",
-        "road_address": "3 Gwangnam-ro 22 beon-gil, Suyeong-gu, Busan, 48307, South Korea",
+        "road_address": "부산광역시 수영구 광남로22번길 3",
+        "lat": 35.1534,
+        "lon": 129.1186,
         "food_category": "국밥",
         "main_menu": "돼지국밥",
         "summary": "수영구 일대의 부산식 국밥 식당",
-        "parking": "정보 없음",
+        "parking": "정보 확인 필요",
         "waiting": "대기 가능",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
     {
         "name": "평양집",
         "sido": "부산광역시",
         "sigungu": "북구",
         "emd": "구포동",
-        "road_address": "21 Geumgok-daero 20beon-gil, Buk-gu, Busan, 46547, South Korea",
+        "road_address": "부산광역시 북구 금곡대로20번길 21",
+        "lat": 35.2098,
+        "lon": 129.0047,
         "food_category": "한식",
         "main_menu": "만두",
         "summary": "북구 구포동의 만두/한식 식당",
-        "parking": "정보 없음",
+        "parking": "정보 확인 필요",
         "waiting": "대기 가능",
         "opening_hours": "정보 확인 필요",
         "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
-    },
-    {
-        "name": "Yulling",
-        "sido": "부산광역시",
-        "sigungu": "해운대구",
-        "emd": "중동",
-        "road_address": "2F, 28 Dalmaji-gil 62 beon-gil, Haeundae-gu, Busan, 48098, South Korea",
-        "food_category": "양식",
-        "main_menu": "프렌치 컨템포러리",
-        "summary": "해운대 달맞이길의 프렌치 컨템포러리 레스토랑",
-        "parking": "가능성 있음",
-        "waiting": "예약 권장",
-        "opening_hours": "정보 확인 필요",
-        "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
-    },
-    {
-        "name": "Le DORER",
-        "sido": "부산광역시",
-        "sigungu": "해운대구",
-        "emd": "우동",
-        "road_address": "2F, 37 Marine city 3-ro, Haeundae-gu, Busan, 48118, South Korea",
-        "food_category": "양식",
-        "main_menu": "컨템포러리",
-        "summary": "해운대 마린시티의 컨템포러리 레스토랑",
-        "parking": "가능성 있음",
-        "waiting": "예약 권장",
-        "opening_hours": "정보 확인 필요",
-        "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
-    },
-    {
-        "name": "Ramsey",
-        "sido": "부산광역시",
-        "sigungu": "수영구",
-        "emd": "민락동",
-        "road_address": "3F, 38 Gwanganhaebyeon-ro 284 beon-gil, Suyeong-gu, Busan, 48285, South Korea",
-        "food_category": "양식",
-        "main_menu": "모던 퀴진",
-        "summary": "광안리 인근의 모던 퀴진 레스토랑",
-        "parking": "가능성 있음",
-        "waiting": "예약 권장",
-        "opening_hours": "정보 확인 필요",
-        "phone": "정보 확인 필요",
-        "source": "MICHELIN Guide",
+        "source": "Starter Data",
     },
 ]
 
@@ -455,29 +386,6 @@ def ensure_geojson_files():
             download_file(url, path)
 
 
-def geocode_address(address: str) -> Tuple[Optional[float], Optional[float]]:
-    geolocator = Nominatim(user_agent="korea_restaurant_map_app")
-    try:
-        location = geolocator.geocode(address, timeout=20)
-        if location:
-            return float(location.latitude), float(location.longitude)
-    except Exception:
-        pass
-    return None, None
-
-
-def fallback_city_center(sido: str, sigungu: str) -> Tuple[float, float]:
-    centers = {
-        ("서울특별시", "중구"): (37.5636, 126.9976),
-        ("서울특별시", "강남구"): (37.5172, 127.0473),
-        ("부산광역시", "해운대구"): (35.1631, 129.1635),
-        ("부산광역시", "수영구"): (35.1456, 129.1131),
-        ("부산광역시", "부산진구"): (35.1629, 129.0531),
-        ("부산광역시", "북구"): (35.1973, 128.9902),
-    }
-    return centers.get((sido, sigungu), KOREA_CENTER[0:2])
-
-
 def prepare_restaurants_if_needed():
     ensure_directories()
 
@@ -486,20 +394,6 @@ def prepare_restaurants_if_needed():
 
     with st.spinner("실존 음식점 스타터 데이터를 생성하는 중입니다..."):
         df = pd.DataFrame(STARTER_RESTAURANTS).copy()
-
-        lats = []
-        lons = []
-
-        for _, row in df.iterrows():
-            lat, lon = geocode_address(row["road_address"])
-            if lat is None or lon is None:
-                lat, lon = fallback_city_center(row["sido"], row["sigungu"])
-            lats.append(lat)
-            lons.append(lon)
-            time.sleep(1)
-
-        df["lat"] = lats
-        df["lon"] = lons
         df["address"] = df["road_address"]
         df["rating"] = pd.NA
         df["review_count"] = 0
@@ -665,7 +559,7 @@ food_type = st.sidebar.selectbox("음식 유형", FOOD_TYPES, index=0)
 search_keyword = st.sidebar.text_input("검색어", placeholder="예: 냉면, 곰탕, 해산물")
 max_results = st.sidebar.slider("최대 표시 개수", 10, 100, 30, 5)
 
-st.sidebar.info("이 버전은 막힌 공공데이터 다운로드 대신 실존 음식점 스타터 데이터를 사용합니다.")
+st.sidebar.info("이 버전은 geopy 없이 바로 실행되도록 좌표를 코드에 직접 포함한 버전입니다.")
 
 st.session_state.selected_sido = "" if selected_sido == "전체" else selected_sido
 st.session_state.selected_sigungu = "" if selected_sigungu == "전체" else selected_sigungu
@@ -683,10 +577,9 @@ def current_level() -> str:
         return "sido_detail"
     return "sido"
 
-level = current_level()
-
 
 def get_display_features() -> Tuple[List[Dict[str, Any]], str]:
+    level = current_level()
     if level == "sido":
         return sido_features, "시도"
     if level == "sido_detail":
@@ -702,6 +595,7 @@ def get_display_features() -> Tuple[List[Dict[str, Any]], str]:
 
 
 display_features, display_label = get_display_features()
+level = current_level()
 
 if display_features:
     lat, lon = get_feature_centroid(display_features[0])
@@ -766,7 +660,14 @@ filtered_df = filter_restaurants_cached(
     st.session_state.selected_emd,
     food_type,
     search_keyword,
-).sort_values(["name"], ascending=[True]).head(max_results)
+).sort_values(["name"], ascending=[True])
+
+if level == "sido":
+    filtered_df = filtered_df.head(min(max_results, MAX_MARKERS_SIDO))
+elif level == "sido_detail":
+    filtered_df = filtered_df.head(min(max_results, MAX_MARKERS_SIGUNGU))
+else:
+    filtered_df = filtered_df.head(min(max_results, MAX_MARKERS_EMD))
 
 # =========================================================
 # 상단 요약
@@ -909,4 +810,4 @@ with right_col:
                 st.markdown(f"[네이버 지도에서 보기]({row['naver_map_url']})")
 
     st.markdown("---")
-    st.info("이 버전은 막힌 공공데이터 서버 대신 실존 음식점 스타터 목록으로 바로 실행되도록 만든 버전입니다.")
+    st.info("이 버전은 geopy 의존성을 제거해서 배포 환경에서도 바로 실행되도록 만든 버전입니다.")
