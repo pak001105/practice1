@@ -1,7 +1,10 @@
 import os
+import re
+import io
 import json
+import ssl
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import pandas as pd
 import requests
@@ -10,6 +13,11 @@ import folium
 from folium.features import GeoJson, GeoJsonTooltip, GeoJsonPopup
 from streamlit_folium import st_folium
 from pyproj import Transformer
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================================================
 # 기본 설정
@@ -21,7 +29,7 @@ st.set_page_config(
 )
 
 st.title("🍽 대한민국 맛집 지도")
-st.caption("실제 행정구역 경계 + 실제 일반음식점 공공데이터 기반 지도")
+st.caption("실제 행정구역 경계 + 공공데이터 기반 실제 음식점 지도")
 
 # =========================================================
 # 경로 / URL
@@ -34,14 +42,20 @@ SIDO_GEO_PATH = os.path.join(GEO_DIR, "sido.geojson")
 SIGUNGU_GEO_PATH = os.path.join(GEO_DIR, "sigungu.geojson")
 EMD_GEO_PATH = os.path.join(GEO_DIR, "emd.geojson")
 
-RESTAURANT_XLSX_PATH = os.path.join(REST_DIR, "general_restaurants.xlsx")
+RESTAURANT_RAW_PATH = os.path.join(REST_DIR, "restaurant_raw_download")
 RESTAURANT_PARQUET_PATH = os.path.join(REST_DIR, "restaurants_merged.parquet")
 RESTAURANT_CSV_PATH = os.path.join(REST_DIR, "restaurants_merged.csv")
 
 SIDO_URL = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/gadm/json/skorea-provinces-geo.json"
 SIGUNGU_URL = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/gadm/json/skorea-municipalities-geo.json"
 EMD_URL = "https://raw.githubusercontent.com/vuski/admdongkor/master/ver20220101/HangJeongDong_ver20220101.geojson"
-RESTAURANT_XLSX_URL = "https://www.localdata.go.kr/datafile/each/07_24_04_P.xlsx"
+
+# 현재 공공데이터포털이 안내하는 일반음식점 제공 URL
+GENERAL_RESTAURANTS_INFO_URL = "https://file.localdata.go.kr/file/general_restaurants/info"
+# 예전 경로(폴백)
+GENERAL_RESTAURANTS_LEGACY_XLSX_URL = "https://www.localdata.go.kr/datafile/each/07_24_04_P.xlsx"
+# 폴백용 모범음식점
+EXCELLENT_RESTAURANTS_INFO_URL = "https://file.localdata.go.kr/file/excellent_restaurant_info/info"
 
 KOREA_CENTER = [36.35, 127.95]
 DEFAULT_ZOOM = 7
@@ -87,13 +101,6 @@ def normalize_str(value: Any) -> str:
     if value is None or pd.isna(value):
         return ""
     return str(value).strip()
-
-
-def download_file(url: str, path: str, timeout: int = 300):
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    with open(path, "wb") as f:
-        f.write(response.content)
 
 
 def make_naver_map_search_url(query: str) -> str:
@@ -213,6 +220,7 @@ def transform_xy_to_wgs84(x_series: pd.Series, y_series: pd.Series):
     x = pd.to_numeric(x_series, errors="coerce")
     y = pd.to_numeric(y_series, errors="coerce")
 
+    # data.go.kr 현재 안내는 EPSG:5174
     t5174 = Transformer.from_crs("EPSG:5174", "EPSG:4326", always_xy=True)
     lon_5174, lat_5174 = t5174.transform(x.values, y.values)
     lat_5174 = pd.Series(lat_5174)
@@ -223,9 +231,7 @@ def transform_xy_to_wgs84(x_series: pd.Series, y_series: pd.Series):
         & lon_5174.between(120, 135, inclusive="both")
     )
 
-    if valid_5174.mean() >= 0.7:
-        return lat_5174, lon_5174
-
+    # 과거 문헌/미러 대응용 폴백
     t2097 = Transformer.from_crs("EPSG:2097", "EPSG:4326", always_xy=True)
     lon_2097, lat_2097 = t2097.transform(x.values, y.values)
     lat_2097 = pd.Series(lat_2097)
@@ -236,10 +242,9 @@ def transform_xy_to_wgs84(x_series: pd.Series, y_series: pd.Series):
         & lon_2097.between(120, 135, inclusive="both")
     )
 
-    if valid_2097.mean() > valid_5174.mean():
-        return lat_2097, lon_2097
-
-    return lat_5174, lon_5174
+    if valid_5174.mean() >= valid_2097.mean():
+        return lat_5174, lon_5174
+    return lat_2097, lon_2097
 
 
 def build_summary(row):
@@ -258,6 +263,96 @@ def build_summary(row):
     return " / ".join(pieces)
 
 
+def make_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        read=3,
+        connect=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "HEAD"]
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive",
+    })
+    return session
+
+
+def robust_get(url: str, timeout: int = 300) -> requests.Response:
+    session = make_session()
+    last_error = None
+
+    # 1차: 기본 검증
+    try:
+        r = session.get(url, timeout=timeout, allow_redirects=True)
+        r.raise_for_status()
+        return r
+    except Exception as e:
+        last_error = e
+
+    # 2차: SSL 검증 해제
+    try:
+        r = session.get(url, timeout=timeout, allow_redirects=True, verify=False)
+        r.raise_for_status()
+        return r
+    except Exception as e:
+        last_error = e
+
+    raise last_error
+
+
+def extract_download_link_from_html(html: str, base_url: str) -> Optional[str]:
+    # csv/xlsx/zip 직접 링크 추출
+    patterns = [
+        r'href=["\']([^"\']+\.csv(?:\?[^"\']*)?)["\']',
+        r'href=["\']([^"\']+\.xlsx(?:\?[^"\']*)?)["\']',
+        r'href=["\']([^"\']+\.zip(?:\?[^"\']*)?)["\']',
+        r'["\'](https?://[^"\']+/(?:download|down)[^"\']*)["\']',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, html, flags=re.IGNORECASE)
+        if m:
+            return urljoin(base_url, m.group(1))
+    return None
+
+
+def download_binary(url: str) -> bytes:
+    r = robust_get(url)
+    ctype = (r.headers.get("content-type") or "").lower()
+
+    # HTML이면 다운로드 링크를 한 번 더 추출
+    if "text/html" in ctype or r.text.lstrip().lower().startswith("<!doctype html") or "<html" in r.text[:1000].lower():
+        link = extract_download_link_from_html(r.text, url)
+        if link:
+            r2 = robust_get(link)
+            r2.raise_for_status()
+            return r2.content
+
+    return r.content
+
+
+def sniff_file_kind(binary: bytes) -> str:
+    if binary[:2] == b"PK":
+        return "xlsx"
+    head = binary[:4000].decode("utf-8", errors="ignore").lower()
+    if "," in head or "사업장명" in head or "업소명" in head:
+        return "csv"
+    if "<html" in head:
+        return "html"
+    return "unknown"
+
+
 # =========================================================
 # 자동 준비
 # =========================================================
@@ -265,13 +360,56 @@ def build_summary(row):
 def ensure_geojson_files():
     ensure_directories()
     targets = [
-        (SIDO_GEO_PATH, SIDO_URL, "시도"),
-        (SIGUNGU_GEO_PATH, SIGUNGU_URL, "시군구"),
-        (EMD_GEO_PATH, EMD_URL, "읍면동"),
+        (SIDO_GEO_PATH, SIDO_URL),
+        (SIGUNGU_GEO_PATH, SIGUNGU_URL),
+        (EMD_GEO_PATH, EMD_URL),
     ]
-    for path, url, label in targets:
+    for path, url in targets:
         if not os.path.exists(path):
-            download_file(url, path)
+            content = download_binary(url)
+            with open(path, "wb") as f:
+                f.write(content)
+
+
+def load_raw_restaurant_source() -> Tuple[pd.DataFrame, str]:
+    """
+    반환: (원본 dataframe, source_name)
+    일반음식점 전체 다운로드를 우선 시도.
+    실패하면 모범음식점으로 폴백.
+    """
+    source_candidates = [
+        ("일반음식점", GENERAL_RESTAURANTS_INFO_URL),
+        ("일반음식점_레거시", GENERAL_RESTAURANTS_LEGACY_XLSX_URL),
+        ("모범음식점", EXCELLENT_RESTAURANTS_INFO_URL),
+    ]
+
+    errors = []
+
+    for label, url in source_candidates:
+        try:
+            raw = download_binary(url)
+            kind = sniff_file_kind(raw)
+
+            if kind == "csv":
+                # utf-8-sig / cp949 가능성 모두 대응
+                try:
+                    df = pd.read_csv(io.BytesIO(raw), encoding="utf-8")
+                except Exception:
+                    try:
+                        df = pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig")
+                    except Exception:
+                        df = pd.read_csv(io.BytesIO(raw), encoding="cp949")
+                return df, label
+
+            if kind == "xlsx":
+                df = pd.read_excel(io.BytesIO(raw), engine="openpyxl")
+                return df, label
+
+            errors.append(f"{label}: 파일 형식을 판별하지 못함")
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+
+    raise RuntimeError("음식점 원본 다운로드에 실패했습니다.\n" + "\n".join(errors))
 
 
 def prepare_restaurants_if_needed():
@@ -280,46 +418,62 @@ def prepare_restaurants_if_needed():
     if os.path.exists(RESTAURANT_PARQUET_PATH) or os.path.exists(RESTAURANT_CSV_PATH):
         return
 
-    if not os.path.exists(RESTAURANT_XLSX_PATH):
-        with st.spinner("전국 일반음식점 원본 데이터를 다운로드하는 중입니다..."):
-            download_file(RESTAURANT_XLSX_URL, RESTAURANT_XLSX_PATH)
+    with st.spinner("음식점 원본 데이터를 내려받고 정리하는 중입니다..."):
+        df, source_label = load_raw_restaurant_source()
 
-    with st.spinner("음식점 데이터를 정리하고 저장하는 중입니다..."):
-        df = pd.read_excel(RESTAURANT_XLSX_PATH, engine="openpyxl")
-
-        col_name = find_col(df, ["사업장명", "업소명"])
-        col_addr = find_col(df, ["소재지전체주소", "지번주소"])
-        col_road = find_col(df, ["도로명전체주소", "소재지도로명전체주소", "소재지도로명주소"])
-        col_x = find_col(df, ["좌표정보(X)", "좌표정보x(epsg5174)", "좌표정보x", "좌표정보(X좌표)", "X", "경도"])
-        col_y = find_col(df, ["좌표정보(Y)", "좌표정보y(epsg5174)", "좌표정보y", "좌표정보(Y좌표)", "Y", "위도"])
-        col_type = find_col(df, ["업태구분명", "위생업태명"])
+        col_name = find_col(df, ["사업장명", "업소명", "업소명칭", "업소명(상호)"])
+        col_addr = find_col(df, ["소재지전체주소", "지번주소", "주소"])
+        col_road = find_col(df, ["도로명전체주소", "소재지도로명전체주소", "소재지도로명주소", "도로명주소"])
+        col_x = find_col(df, ["좌표정보(X)", "좌표정보x(epsg5174)", "좌표정보x", "좌표정보(X좌표)", "X"])
+        col_y = find_col(df, ["좌표정보(Y)", "좌표정보y(epsg5174)", "좌표정보y", "좌표정보(Y좌표)", "Y"])
+        col_type = find_col(df, ["업태구분명", "위생업태명", "음식의유형", "주된음식종류"])
         col_phone = find_col(df, ["소재지전화", "전화번호"])
         col_status = find_col(df, ["영업상태명"])
         col_detail_status = find_col(df, ["상세영업상태명"])
         col_status_code = find_col(df, ["영업상태구분코드", "상세영업상태코드"])
 
-        required = [col_name, col_addr, col_road, col_x, col_y]
+        # 모범음식점 폴백은 위경도가 바로 있는 경우도 있음
+        if col_x is None:
+            col_x = find_col(df, ["경도"])
+        if col_y is None:
+            col_y = find_col(df, ["위도"])
+
+        required = [col_name, col_addr or col_road, col_x, col_y]
         if any(c is None for c in required):
             raise ValueError(
-                f"원본 파일의 핵심 컬럼을 찾지 못했습니다. "
+                "원본 파일의 핵심 컬럼을 찾지 못했습니다.\n"
                 f"name={col_name}, addr={col_addr}, road={col_road}, x={col_x}, y={col_y}"
             )
 
         work = df.copy()
 
-        if col_detail_status:
-            work = work[work[col_detail_status].astype(str).str.contains("정상|영업", na=False)].copy()
-        elif col_status:
-            work = work[work[col_status].astype(str).str.contains("정상|영업", na=False)].copy()
-        elif col_status_code:
-            work = work[pd.to_numeric(work[col_status_code], errors="coerce").fillna(-1).isin([1])].copy()
+        # 일반음식점이면 영업중만 필터
+        if source_label.startswith("일반음식점"):
+            if col_detail_status:
+                work = work[work[col_detail_status].astype(str).str.contains("정상|영업", na=False)].copy()
+            elif col_status:
+                work = work[work[col_status].astype(str).str.contains("정상|영업", na=False)].copy()
+            elif col_status_code:
+                work = work[pd.to_numeric(work[col_status_code], errors="coerce").fillna(-1).isin([1])].copy()
 
-        lat, lon = transform_xy_to_wgs84(work[col_x], work[col_y])
+        # 좌표 처리
+        x_num = pd.to_numeric(work[col_x], errors="coerce")
+        y_num = pd.to_numeric(work[col_y], errors="coerce")
+
+        # 이미 위경도 형태면 그대로 사용
+        if x_num.between(120, 135, inclusive="both").mean() > 0.7 and y_num.between(30, 40, inclusive="both").mean() > 0.7:
+            lon = x_num
+            lat = y_num
+        else:
+            lat, lon = transform_xy_to_wgs84(work[col_x], work[col_y])
+
+        addr_series = work[col_road] if col_road else work[col_addr]
+        addr_series = addr_series.where(addr_series.astype(str).str.strip() != "", work[col_addr] if col_addr else "")
 
         out = pd.DataFrame({
             "name": work[col_name].astype(str).fillna("").str.strip(),
-            "address": work[col_addr].astype(str).fillna("").str.strip(),
-            "road_address": work[col_road].astype(str).fillna("").str.strip(),
+            "address": work[col_addr].astype(str).fillna("").str.strip() if col_addr else "",
+            "road_address": work[col_road].astype(str).fillna("").str.strip() if col_road else "",
             "lat": lat,
             "lon": lon,
             "food_category": work[col_type].astype(str).fillna("").str.strip() if col_type else "",
@@ -346,7 +500,7 @@ def prepare_restaurants_if_needed():
         out["parking"] = ""
         out["waiting"] = ""
         out["opening_hours"] = ""
-        out["source"] = "지방행정인허가데이터개방 일반음식점"
+        out["source"] = "지방행정인허가데이터개방 일반음식점" if source_label.startswith("일반음식점") else "전국모범음식점표준데이터"
         out["naver_map_url"] = out.apply(
             lambda r: make_naver_map_search_url(f"{r['name']} {r['road_address'] or r['address']}"),
             axis=1
@@ -429,12 +583,11 @@ def load_restaurants() -> pd.DataFrame:
         & df["lon"].between(120, 135, inclusive="both")
     ].copy()
 
-    df["priority_score"] = df["review_count"].fillna(0)
     return df
 
 
 # =========================================================
-# 자동 준비 실행
+# 초기 준비
 # =========================================================
 try:
     ensure_geojson_files()
@@ -444,7 +597,7 @@ except Exception as e:
     st.stop()
 
 # =========================================================
-# 로딩
+# 데이터 로딩
 # =========================================================
 try:
     sido_geo = load_geojson(SIDO_GEO_PATH)
@@ -536,10 +689,9 @@ selected_emd = st.sidebar.selectbox(
 
 food_type = st.sidebar.selectbox("음식 유형", FOOD_TYPES, index=0)
 search_keyword = st.sidebar.text_input("검색어", placeholder="예: 냉면, 국밥, 가족식사")
-sort_option = st.sidebar.radio("정렬 기준", ["이름순"], index=0)
 max_results = st.sidebar.slider("최대 표시 개수", 30, 300, 120, 10)
 
-st.sidebar.info("현재 기본 데이터는 공공데이터 일반음식점 파일 기준이라 평점/리뷰수는 비어 있을 수 있습니다.")
+st.sidebar.info("일반음식점 전체 다운로드가 실패하면 모범음식점 데이터로 자동 대체됩니다.")
 
 st.session_state.selected_sido = "" if selected_sido == "전체" else selected_sido
 st.session_state.selected_sigungu = "" if selected_sigungu == "전체" else selected_sigungu
@@ -559,25 +711,18 @@ def current_level() -> str:
 
 level = current_level()
 
-# =========================================================
-# 표시 feature
-# =========================================================
 def get_display_features() -> Tuple[List[Dict[str, Any]], str]:
     if level == "sido":
         return sido_features, "시도"
-
     if level == "sido_detail":
         filtered = [f for f in sigungu_features if contains_name(f["properties"], st.session_state.selected_sido)]
         return filtered if filtered else sido_features, "시군구"
-
     if level == "sigungu":
         filtered = [f for f in emd_features if contains_name(f["properties"], st.session_state.selected_sigungu)]
         return filtered if filtered else sigungu_features, "읍면동"
-
     if level == "emd":
         filtered = [f for f in emd_features if f["properties"].get("_display_name") == st.session_state.selected_emd]
         return filtered if filtered else emd_features, "읍면동"
-
     return sido_features, "시도"
 
 display_features, display_label = get_display_features()
@@ -643,9 +788,7 @@ filtered_df = filter_restaurants_cached(
     st.session_state.selected_emd,
     food_type,
     search_keyword,
-)
-
-filtered_df = filtered_df.sort_values(["name"], ascending=[True])
+).sort_values(["name"], ascending=[True])
 
 if level == "sido":
     marker_limit = min(max_results, MAX_MARKERS_SIDO)
@@ -680,36 +823,27 @@ with left_col:
 
     geojson_to_show = {"type": "FeatureCollection", "features": display_features}
 
-    def style_fn(_feature):
-        return {
+    GeoJson(
+        geojson_to_show,
+        name=f"{display_label} 경계",
+        style_function=lambda _f: {
             "fillColor": "#4F8BF9",
             "color": "#1E3A8A",
             "weight": 1.2,
             "fillOpacity": 0.18,
-        }
-
-    def highlight_fn(_feature):
-        return {
+        },
+        highlight_function=lambda _f: {
             "fillColor": "#2563EB",
             "color": "#0F172A",
             "weight": 2.0,
             "fillOpacity": 0.32,
-        }
-
-    GeoJson(
-        geojson_to_show,
-        name=f"{display_label} 경계",
-        style_function=style_fn,
-        highlight_function=highlight_fn,
+        },
         tooltip=GeoJsonTooltip(
             fields=["_display_name"],
             aliases=[f"{display_label}:"],
             sticky=True,
             labels=True,
-            style=(
-                "background-color: white; color: #111827; font-family: Arial; "
-                "font-size: 13px; padding: 8px; border-radius: 6px;"
-            ),
+            style="background-color: white; color: #111827; font-size: 13px; padding: 8px; border-radius: 6px;",
         ),
         popup=GeoJsonPopup(
             fields=["_display_name", "_display_code"],
@@ -728,8 +862,6 @@ with left_col:
             <div><b>행정구역</b>: {row['sido']} {row['sigungu']} {row['emd']}</div>
             <div><b>주소</b>: {road_address}</div>
             <div><b>음식 유형</b>: {row['food_category'] if normalize_str(row['food_category']) else '정보 없음'}</div>
-            <div><b>평점</b>: 정보 없음</div>
-            <div><b>리뷰 수</b>: 정보 없음</div>
             <div><b>대표 메뉴</b>: {row['main_menu'] if normalize_str(row['main_menu']) else '정보 없음'}</div>
             <div><b>요약</b>: {row['summary'] if normalize_str(row['summary']) else '정보 없음'}</div>
             <div><b>주차</b>: {row['parking'] if normalize_str(row['parking']) else '정보 없음'}</div>
@@ -742,11 +874,9 @@ with left_col:
         </div>
         """
 
-        tooltip_text = f"{row['name']} | {row['food_category']}"
-
         folium.Marker(
             location=[row["lat"], row["lon"]],
-            tooltip=tooltip_text,
+            tooltip=f"{row['name']} | {row['food_category']}",
             popup=folium.Popup(popup_html, max_width=380),
             icon=folium.Icon(icon="cutlery", prefix="fa"),
         ).add_to(m)
@@ -794,7 +924,7 @@ with right_col:
     if filtered_df.empty:
         st.info("현재 조건에 맞는 업소가 없습니다.")
     else:
-        show_cols = ["name", "food_category", "sido", "sigungu", "emd"]
+        show_cols = ["name", "food_category", "sido", "sigungu", "emd", "source"]
         st.dataframe(filtered_df[show_cols], use_container_width=True, height=260)
 
         for i, (_, row) in enumerate(filtered_df.head(12).iterrows(), start=1):
@@ -802,13 +932,7 @@ with right_col:
                 st.markdown(f"**행정구역**: {row['sido']} {row['sigungu']} {row['emd']}")
                 st.markdown(f"**주소**: {row['road_address'] if normalize_str(row['road_address']) else row['address']}")
                 st.markdown(f"**음식 유형**: {row['food_category'] if normalize_str(row['food_category']) else '정보 없음'}")
-                st.markdown(f"**대표 메뉴**: {row['main_menu'] if normalize_str(row['main_menu']) else '정보 없음'}")
                 st.markdown(f"**설명**: {row['summary'] if normalize_str(row['summary']) else '정보 없음'}")
-                st.markdown(f"**주차**: {row['parking'] if normalize_str(row['parking']) else '정보 없음'}")
-                st.markdown(f"**웨이팅**: {row['waiting'] if normalize_str(row['waiting']) else '정보 없음'}")
-                st.markdown(f"**운영시간**: {row['opening_hours'] if normalize_str(row['opening_hours']) else '정보 없음'}")
                 st.markdown(f"**전화번호**: {row['phone'] if normalize_str(row['phone']) else '정보 없음'}")
+                st.markdown(f"**출처**: {row['source']}")
                 st.markdown(f"[네이버 지도에서 보기]({row['naver_map_url']})")
-
-    st.markdown("---")
-    st.info("처음 실행 시에는 필요한 행정구역 파일과 음식점 원본 파일을 자동으로 내려받아 데이터 파일을 생성합니다.")
