@@ -2,5 +2,8 @@ streamlit
 pandas
 folium
 streamlit-folium
+requests
 pyarrow
 fastparquet
+pyproj
+openpyxl
